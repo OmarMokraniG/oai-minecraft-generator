@@ -38,6 +38,9 @@ The portal creates/reuses the Entra account, verifies both application access
 controls, and sends a Spanish email containing the guest acceptance link when
 needed, the application/sign-in links, and photo/generation/download instructions.
 Existing directory users also receive the instructions email.
+Use an address with a working mailbox: an Entra sign-in name does not necessarily
+receive email. Delivery failures such as a nonexistent recipient domain are
+recorded in the email delivery diagnostics, even after the send was accepted.
 
 An Azure Container Apps Job performs each invitation independently of the browser.
 The portal shows progress and the ten most recent executions. Only one invitation
