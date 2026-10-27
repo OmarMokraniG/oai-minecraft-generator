@@ -46,13 +46,22 @@ Use an address with a working mailbox: an Entra sign-in name does not necessaril
 receive email. Delivery failures such as a nonexistent recipient domain are
 recorded in the email delivery diagnostics, even after the send was accepted.
 
-An Azure Container Apps Job performs each invitation independently of the browser.
-The portal shows progress and the ten most recent executions. Only one invitation
-can run at a time; retries of the same request reuse its execution. A successful
-execution means Azure Communication Services accepted the email for delivery,
+The **Usuarios y accesos** section lists authorized users with their name, email
+and application access status. Search by name/email, refresh the list, or select
+**Revocar acceso** and confirm. Revocation removes access from both controls
+without deleting the Entra account or affecting other applications, and sends no
+email. The administrator is protected in the interface, API and worker. Use the
+invitation form to restore access and resend instructions.
+Deleted directory accounts and mismatched access controls remain visible rather
+than being silently hidden; directory/permission errors are shown explicitly.
+
+An Azure Container Apps Job performs each access operation independently of the browser.
+The portal shows progress and the ten most recent executions. Only one access
+operation can run at a time; retries of the same request reuse its execution.
+A successful invitation means Azure Communication Services accepted the email for delivery,
 not that the recipient has opened it or that their mailbox has accepted it.
 Check spam/junk if necessary. A failed operation is not reported as success:
-access may already exist, so inspect the job logs before retrying.
+permissions may have been partially updated, so inspect the job logs before retrying.
 
 ### Command-line administration and revocation
 
@@ -164,9 +173,11 @@ Container Apps secret before expiry.
 deploys the portal/job in `Release`; `deploy.ps1` invokes both automatically.
 Use `-SkipPortal` only for a generator-only release after the portal is installed.
 Initial provisioning also requires Entra administrator consent for the worker's
-`User.ReadBasic.All` and `User.Invite.All` application permissions. Its custom Azure
-roles are scoped to the generator and communication resource. The portal can
-read/start only its invitation job, not edit the generator directly. Job start
+`User.ReadBasic.All` and `User.Invite.All` application permissions, and the portal's
+`User.ReadBasic.All` permission to display basic directory profiles. The worker's custom Azure
+roles are scoped to the generator and communication resource. The portal has
+read-only generator/auth-configuration access and can read/start its access job,
+but cannot edit the generator directly or delete directory accounts. Job start
 permission permits overriding the job template and using its identity, so the
 portal remains a trusted administrative component, not an isolation boundary.
 It validates administrator identity, same-origin requests, CSRF, email and request
@@ -189,10 +200,12 @@ The PowerShell tests mock Azure CLI and check deployment identity, guest
 invitations, both authorization controls, revocation, failure recovery and
 preservation of access during redeployment. They do not send real invitations.
 The Node.js client regression tests cover empty authentication/gateway responses,
-safe sign-in recovery and unconfirmed submissions. The image build runs them in
+safe sign-in recovery, unconfirmed submissions, user search, protected administrator
+controls and revocation confirmation. The image build runs them in
 a separate Node.js 24 stage; Node.js is not included in the runtime image.
 Python tests also cover administrator-only invitation access, CSRF, invalid input,
-new/existing users, durable job submission, idempotency, and email failure handling.
+new/existing users, durable job submission, idempotency, email failure handling,
+user listing, partial revocation recovery and the worker's no-email revocation path.
 
 `scripts\smoke_test.py` performs real image generation, private blob upload,
 signed/unsigned download checks, vision analysis, and a second generation from
@@ -231,4 +244,4 @@ Invitations incur job execution and email delivery charges. The Azure-managed
 email domain is intended for testing/low volume and has service sending quotas;
 use a verified custom domain and request quota increases before bulk use. The
 portal is not a mailing-list or bulk-invitation service. Never run CLI access
-changes or redeploy the generator concurrently with an invitation job.
+changes or redeploy the generator concurrently with an access job.

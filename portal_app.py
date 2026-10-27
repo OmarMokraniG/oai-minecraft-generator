@@ -18,13 +18,13 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from invitation_service import AzureApi, InvitationJobs, https_url, normalize_email
+from invitation_service import AccessManager, AzureApi, InvitationJobs, https_url, normalize_email
 
 logger = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "portal"
 
 
-def create_app(administrator, base_url, generator_url, jobs):
+def create_app(administrator, base_url, generator_url, jobs, access):
     administrator = str(UUID(administrator))
     base_url = https_url(base_url)
     generator_url = https_url(generator_url)
@@ -40,10 +40,7 @@ def create_app(administrator, base_url, generator_url, jobs):
         )
         return response
 
-    async def invitations(request: Request):
-        if request.method == "GET":
-            executions = await run_in_threadpool(jobs.executions)
-            return JSONResponse({"invitations": [jobs.summary(item) for item in executions[:10]]})
+    async def mutation_body(request: Request, fields):
         cookie = request.cookies.get("portal-csrf", "")
         token = request.headers.get("X-CSRF-Token", "")
         if (
@@ -63,16 +60,55 @@ def create_app(administrator, base_url, generator_url, jobs):
                 return JSONResponse({"error": "Solicitud demasiado grande."}, status_code=413)
         try:
             body = json.loads(payload)
-            if not isinstance(body, dict) or set(body) != {"email", "requestId"}:
-                raise ValueError("Invalid invitation fields")
-            recipient = normalize_email(body["email"])
-            request_id = str(UUID(body["requestId"]))
+            if not isinstance(body, dict) or set(body) != fields:
+                raise ValueError("Invalid operation fields")
+            body["requestId"] = str(UUID(body["requestId"]))
         except (ValueError, TypeError, AttributeError):
             return JSONResponse(
-                {"error": "Introduce un correo y una solicitud validos."}, status_code=400
+                {"error": "Introduce los datos y una solicitud validos."}, status_code=400
             )
+        return body
+
+    async def invitations(request: Request):
+        if request.method == "GET":
+            executions = await run_in_threadpool(jobs.executions)
+            return JSONResponse({"invitations": [jobs.summary(item) for item in executions[:10]]})
+        body = await mutation_body(request, {"email", "requestId"})
+        if isinstance(body, JSONResponse):
+            return body
         try:
-            execution = await run_in_threadpool(jobs.start, recipient, request_id)
+            recipient = normalize_email(body["email"])
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "Introduce un correo valido."}, status_code=400)
+        try:
+            execution = await run_in_threadpool(jobs.start, recipient, body["requestId"])
+        except RuntimeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        return JSONResponse(execution, status_code=202)
+
+    async def users(request):
+        return JSONResponse(await run_in_threadpool(access.users))
+
+    async def revoke(request):
+        body = await mutation_body(request, {"requestId"})
+        if isinstance(body, JSONResponse):
+            return body
+        try:
+            principal = str(UUID(request.path_params["user_id"]))
+        except ValueError:
+            return JSONResponse({"error": "Usuario no valido."}, status_code=400)
+        if principal == administrator:
+            return JSONResponse(
+                {
+                    "error": "La cuenta administradora esta protegida; no se puede revocar su acceso."
+                },
+                status_code=403,
+            )
+        user = await run_in_threadpool(access.describe_user, principal)
+        try:
+            execution = await run_in_threadpool(
+                jobs.revoke, principal, body["requestId"], user["email"] or user["name"]
+            )
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         return JSONResponse(execution, status_code=202)
@@ -91,6 +127,8 @@ def create_app(administrator, base_url, generator_url, jobs):
             Route("/health", lambda request: JSONResponse({"status": "ok"})),
             Route("/", index),
             Route("/api/session", session),
+            Route("/api/users", users),
+            Route("/api/users/{user_id}/revoke", revoke, methods=["POST"]),
             Route("/api/invitations", invitations, methods=["GET", "POST"]),
             Route("/api/invitations/{execution}", status),
             Mount("/static", app=StaticFiles(directory=STATIC)),
@@ -136,10 +174,17 @@ if __name__ == "__main__":
     import uvicorn
 
     credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+    api = AzureApi(credential)
     app = create_app(
         os.environ["ADMIN_USER_ID"],
         os.environ["PORTAL_BASE_URL"],
         os.environ["GENERATOR_URL"],
-        InvitationJobs(AzureApi(credential), os.environ["INVITATION_JOB_RESOURCE_ID"]),
+        InvitationJobs(api, os.environ["INVITATION_JOB_RESOURCE_ID"]),
+        AccessManager(
+            api,
+            os.environ["GENERATOR_RESOURCE_ID"],
+            os.environ["ADMIN_USER_ID"],
+            os.environ["GENERATOR_URL"],
+        ),
     )
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)

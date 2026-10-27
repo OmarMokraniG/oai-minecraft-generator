@@ -3,15 +3,22 @@ const button = document.getElementById("submit");
 const status = document.getElementById("status");
 const history = document.getElementById("history");
 const relogin = document.getElementById("relogin");
+const userTable = document.getElementById("users");
+const usersStatus = document.getElementById("users-status");
+const userSearch = document.getElementById("user-search");
 const loginUrl = "/.auth/login/aad?post_login_redirect_uri=%2F";
 let csrf;
 let pendingRequest;
 let timer;
 let awaitingExecution = sessionStorage.getItem("invitation-execution");
+let users = [];
+let userButtons = [];
+let busy = true;
+let usersOperation;
 
 const labels = {
   Succeeded: "Acceso configurado y correo enviado al servicio de entrega",
-  Failed: "No se pudo completar. El acceso puede estar creado; revisa los registros de Azure antes de reintentar",
+  Failed: "No se pudo completar. Los permisos pueden haberse actualizado parcialmente; revisa los registros de Azure antes de reintentar",
   Stopped: "Operacion detenida",
   Running: "Configurando acceso y enviando instrucciones",
   Processing: "Preparando la invitacion"
@@ -23,10 +30,106 @@ function show(message, error = false) {
   status.dataset.error = String(error);
 }
 
+function setBusy(value) {
+  busy = value;
+  button.disabled = value;
+  for (const action of userButtons) action.disabled = value;
+}
+
+function operationText(item) {
+  const message = item.action === "revoke" && item.status === "Succeeded"
+    ? "Acceso revocado (sin eliminar la cuenta)"
+    : item.action === "revoke" && !terminal.has(item.status)
+      ? "Revocando acceso" : labels[item.status] || `Estado: ${item.status}`;
+  return `${item.label || item.email || item.userId || item.id}: ${message}`;
+}
+
+function renderUsers() {
+  userTable.replaceChildren();
+  userButtons = [];
+  const query = userSearch.value.trim().toLocaleLowerCase();
+  const visible = users.filter(user =>
+    `${user.name} ${user.email || ""} ${user.id}`.toLocaleLowerCase().includes(query));
+  for (const user of visible) {
+    const row = document.createElement("tr");
+    const state = user.directoryMissing ? "Cuenta eliminada en Entra"
+      : !user.hasAccess ? "Pendiente de sincronizar"
+        : user.isAdministrator ? "Administrador" : "Con acceso";
+    for (const text of [user.name, user.email || "Sin correo disponible", state]) {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    const actions = document.createElement("td");
+    if (user.isAdministrator) {
+      actions.textContent = "Protegido";
+      actions.className = "protected";
+    } else {
+      const revoke = document.createElement("button");
+      revoke.type = "button";
+      revoke.className = "danger";
+      revoke.textContent = "Revocar acceso";
+      revoke.disabled = busy;
+      revoke.addEventListener("click", () => revokeAccess(user));
+      actions.appendChild(revoke);
+      userButtons.push(revoke);
+    }
+    row.appendChild(actions);
+    userTable.appendChild(row);
+  }
+  if (!visible.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = users.length ? "No hay usuarios que coincidan." : "No hay usuarios.";
+    row.appendChild(cell);
+    userTable.appendChild(row);
+  }
+}
+
+async function loadUsers() {
+  document.getElementById("refresh-users").disabled = true;
+  usersStatus.textContent = "Cargando usuarios...";
+  try {
+    const result = await api("/api/users");
+    if (!Array.isArray(result.users) || typeof result.synchronized !== "boolean") {
+      throw new Error("La respuesta de usuarios esta incompleta. Reintenta la consulta.");
+    }
+    users = result.users;
+    renderUsers();
+    usersStatus.dataset.error = String(!result.synchronized);
+    usersStatus.textContent = result.synchronized
+      ? `${users.length} registros de acceso.`
+      : "Hay permisos pendientes de sincronizar. Una invitacion o revocacion sincronizara ambos controles.";
+  } catch (error) {
+    if (recoverAuthentication(error)) return;
+    usersStatus.dataset.error = "true";
+    usersStatus.textContent = `No se pudieron cargar los usuarios: ${error.message}`;
+  } finally {
+    document.getElementById("refresh-users").disabled = false;
+  }
+}
+
+async function revokeAccess(user) {
+  if (user.isAdministrator) {
+    show("La cuenta administradora esta protegida.", true);
+    return;
+  }
+  const label = user.email || user.name;
+  if (!window.confirm(`Revocar el acceso de ${label} a Minecraft Generator? La cuenta no se eliminara de Entra.`)) return;
+  if (!pendingRequest || pendingRequest.action !== "revoke" || pendingRequest.userId !== user.id) {
+    pendingRequest = { action: "revoke", userId: user.id, label, requestId: crypto.randomUUID() };
+  }
+  show(`Revocando acceso de ${label}...`);
+  await submitOperation(`/api/users/${encodeURIComponent(user.id)}/revoke`, {
+    requestId: pendingRequest.requestId
+  });
+}
+
 function recoverAuthentication(error) {
   if (error.status !== 401 && error.status !== 403) return false;
   clearTimeout(timer);
-  button.disabled = true;
+  setBusy(true);
   relogin.hidden = false;
   show(error.message, true);
   if (error.status === 401) {
@@ -79,7 +182,7 @@ async function refresh() {
   history.replaceChildren();
   for (const item of result.invitations) {
     const row = document.createElement("li");
-    row.textContent = `${item.email || item.id}: ${labels[item.status] || `Estado: ${item.status}`}`;
+    row.textContent = operationText(item);
     history.appendChild(row);
   }
   if (awaitingExecution) {
@@ -92,18 +195,28 @@ async function refresh() {
   }
   const active = result.invitations.find(item => !terminal.has(item.status));
   if (active || awaitingExecution) {
-    button.disabled = true;
-    show(active ? `${active.email}: ${labels[active.status] || active.status}` : "Esperando el estado de Azure...");
+    setBusy(true);
+    show(active ? operationText(active) : "Esperando el estado de Azure...");
+    if (usersOperation === undefined) {
+      usersOperation = "active";
+      await loadUsers();
+    }
     timer = setTimeout(poll, 3000);
   } else if (pendingRequest) {
-    button.disabled = false;
-    show(`No se ha confirmado la invitacion a ${pendingRequest.email}. Reintenta el envio; se reutilizara la misma solicitud para evitar duplicados.`, true);
+    setBusy(false);
+    const target = pendingRequest.action === "revoke" ? `revocacion de ${pendingRequest.label}`
+      : `invitacion a ${pendingRequest.email}`;
+    show(`No se ha confirmado la ${target}. Reintenta la operacion; se reutilizara la misma solicitud para evitar duplicados.`, true);
     timer = setTimeout(poll, 5000);
   } else {
-    button.disabled = false;
+    setBusy(false);
     const latest = result.invitations[0];
-    if (latest) show(`${latest.email}: ${labels[latest.status] || latest.status}`, latest.status !== "Succeeded");
+    if (latest) show(operationText(latest), latest.status !== "Succeeded");
     else show("Preparado para enviar una invitacion.");
+    if (usersOperation !== (latest?.id || "initial")) {
+      usersOperation = latest?.id || "initial";
+      await loadUsers();
+    }
   }
 }
 
@@ -117,20 +230,14 @@ async function poll() {
   }
 }
 
-form.addEventListener("submit", async event => {
-  event.preventDefault();
-  button.disabled = true;
+async function submitOperation(path, payload) {
+  setBusy(true);
   clearTimeout(timer);
-  const email = document.getElementById("email").value.trim();
-  if (!pendingRequest || pendingRequest.email !== email) {
-    pendingRequest = { email, requestId: crypto.randomUUID() };
-  }
-  show("Iniciando la invitacion...");
   try {
-    const execution = await api("/api/invitations", {
+    const execution = await api(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
-      body: JSON.stringify(pendingRequest)
+      body: JSON.stringify(payload)
     });
     awaitingExecution = execution.id;
     sessionStorage.setItem("invitation-execution", awaitingExecution);
@@ -139,10 +246,23 @@ form.addEventListener("submit", async event => {
   } catch (error) {
     if (recoverAuthentication(error)) return;
     show(error.message, true);
-    button.disabled = false;
+    setBusy(false);
     timer = setTimeout(poll, 5000);
   }
+}
+
+form.addEventListener("submit", async event => {
+  event.preventDefault();
+  const email = document.getElementById("email").value.trim();
+  if (!pendingRequest || pendingRequest.action !== "invite" || pendingRequest.email !== email) {
+    pendingRequest = { action: "invite", email, requestId: crypto.randomUUID() };
+  }
+  show("Iniciando la invitacion...");
+  await submitOperation("/api/invitations", { email, requestId: pendingRequest.requestId });
 });
+
+userSearch.addEventListener("input", renderUsers);
+document.getElementById("refresh-users").addEventListener("click", loadUsers);
 
 (async () => {
   try {

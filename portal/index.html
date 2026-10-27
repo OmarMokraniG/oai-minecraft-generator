@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Invitaciones - Minecraft Generator</title>
+  <title>Usuarios e invitaciones - Minecraft Generator</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/portal.js" defer></script>
 </head>
@@ -24,7 +24,21 @@
     <p class="muted">Solo tu cuenta de administrador puede usar este portal. Los invitados no reciben permisos sobre Azure ni GitHub.</p>
   </section>
   <section class="card">
-    <h2>Invitaciones recientes</h2>
+    <h2>Usuarios y accesos</h2>
+    <label for="user-search">Buscar por nombre o correo</label>
+    <input id="user-search" type="search" placeholder="Buscar usuarios..." autocomplete="off">
+    <button id="refresh-users" type="button">Actualizar usuarios</button>
+    <p id="users-status" role="status">Cargando usuarios...</p>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Usuario</th><th>Correo</th><th>Estado</th><th>Acceso</th></tr></thead>
+        <tbody id="users"></tbody>
+      </table>
+    </div>
+    <p class="muted">Revocar solo quita el acceso a Minecraft Generator. No borra la cuenta de Entra ni cambia sus permisos en otras aplicaciones. Tu cuenta administradora esta protegida. Para dar acceso de nuevo, utiliza el formulario de invitacion.</p>
+  </section>
+  <section class="card">
+    <h2>Operaciones recientes</h2>
     <p class="muted">El proceso contin&uacute;a en Azure aunque cierres esta p&aacute;gina. Puede tardar unos minutos.</p>
     <ul id="history"></ul>
   </section>

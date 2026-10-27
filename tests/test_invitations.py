@@ -178,7 +178,11 @@ def portal():
     jobs = MagicMock()
     jobs.executions.return_value = []
     jobs.start.return_value = {"id": "invite-abc", "status": "Processing"}
-    client = TestClient(create_app(ADMIN, PORTAL_URL, APP_URL, jobs), base_url=PORTAL_URL)
+    access = MagicMock()
+    access.users.return_value = {"users": [], "synchronized": True}
+    access.describe_user.return_value = {"email": "friend@example.com", "name": "Friend"}
+    jobs.revoke.return_value = {"id": "revoke-abc", "status": "Processing", "action": "revoke"}
+    client = TestClient(create_app(ADMIN, PORTAL_URL, APP_URL, jobs, access), base_url=PORTAL_URL)
     client.headers["X-Ms-Client-Principal-Id"] = ADMIN
     csrf = client.get("/api/session").json()["csrf"]
     client.headers.update({"Origin": PORTAL_URL, "X-CSRF-Token": csrf})
@@ -189,7 +193,7 @@ def portal():
 def test_portal_rejects_anonymous_and_non_admin_without_side_effects(portal, principal):
     client, jobs = portal
     client.headers["X-Ms-Client-Principal-Id"] = principal
-    for path in ["/", "/api/session", "/api/invitations"]:
+    for path in ["/", "/api/session", "/api/invitations", "/api/users"]:
         assert client.get(path).status_code == 403
     assert (
         client.post(
@@ -199,6 +203,10 @@ def test_portal_rejects_anonymous_and_non_admin_without_side_effects(portal, pri
     )
     jobs.start.assert_not_called()
     jobs.executions.assert_not_called()
+    assert (
+        client.post(f"/api/users/{GUEST}/revoke", json={"requestId": OPERATION}).status_code == 403
+    )
+    jobs.revoke.assert_not_called()
 
 
 @pytest.mark.parametrize("case", ["origin", "csrf", "email", "fields", "uuid", "size"])
@@ -286,3 +294,149 @@ def test_invitation_email_includes_redeem_and_app_links_and_escapes_recipient():
     assert f"{APP_URL}/.auth/login/aad" in message["content"]["plainText"]
     assert "&lt;friend&gt;" in message["content"]["html"]
     assert "<friend>" not in message["content"]["html"]
+
+
+@pytest.mark.parametrize("already_removed_from_auth", [False, True])
+def test_revoke_updates_both_controls_and_repairs_partial_removal(already_removed_from_auth):
+    api = MagicMock()
+    initial = auth([ADMIN] if already_removed_from_auth else [ADMIN, GUEST])
+    api.arm.side_effect = [initial, {}, app([ADMIN, GUEST]), {}, app([ADMIN]), auth([ADMIN])]
+    AccessManager(api, RESOURCE, ADMIN, APP_URL).revoke(GUEST)
+    writes = [call for call in api.arm.call_args_list if call.args[0] in {"PUT", "PATCH"}]
+    allowed = writes[0].kwargs["json"]["properties"]["identityProviders"]["azureActiveDirectory"][
+        "validation"
+    ]["defaultAuthorizationPolicy"]["allowedPrincipals"]["identities"]
+    assert allowed == [ADMIN]
+    assert writes[1].kwargs["json"]["properties"]["template"]["containers"][0]["env"] == [
+        {"name": "ALLOWED_USER_IDS", "value": ADMIN}
+    ]
+    api.request.assert_not_called()
+    assert all(call.args[0] != "DELETE" for call in api.arm.call_args_list)
+
+
+def test_revoke_cannot_remove_administrator_even_before_reading_azure():
+    api = MagicMock()
+    with pytest.raises(ValueError, match="administrador"):
+        AccessManager(api, RESOURCE, ADMIN, APP_URL).revoke(ADMIN)
+    api.arm.assert_not_called()
+    api.request.assert_not_called()
+
+
+def test_user_list_reports_partial_permissions_and_deleted_directory_accounts():
+    api = MagicMock()
+    api.arm.side_effect = [auth([ADMIN, GUEST]), app([ADMIN, OPERATION])]
+    response = requests.Response()
+    response.status_code = 404
+    api.request.side_effect = [
+        {"id": ADMIN, "displayName": "Admin", "userPrincipalName": "admin@example.com"},
+        {"id": GUEST, "displayName": "Friend", "mail": "friend@example.com"},
+        requests.HTTPError(response=response),
+    ]
+    result = AccessManager(api, RESOURCE, ADMIN, APP_URL).users()
+    assert result["synchronized"] is False
+    users = {user["id"]: user for user in result["users"]}
+    assert users[ADMIN]["hasAccess"] and users[ADMIN]["isAdministrator"]
+    assert not users[GUEST]["hasAccess"]
+    assert users[OPERATION]["directoryMissing"]
+    assert not users[OPERATION]["hasAccess"]
+    assert len(users) == 3
+
+
+def test_directory_permission_failure_is_not_reported_as_a_deleted_user():
+    api = MagicMock()
+    response = requests.Response()
+    response.status_code = 403
+    api.request.side_effect = requests.HTTPError(response=response)
+    with pytest.raises(requests.HTTPError):
+        AccessManager(api, RESOURCE, ADMIN, APP_URL).describe_user(GUEST)
+
+
+def test_revoke_job_has_no_invitation_email_and_conflicting_retries_are_rejected():
+    api = MagicMock()
+    api.arm.side_effect = [
+        {"value": []},
+        {
+            "properties": {
+                "template": {
+                    "containers": [
+                        {
+                            "name": "worker",
+                            "image": "verified-image",
+                            "env": [{"name": "INVITED_EMAIL", "value": "stale@example.com"}],
+                        }
+                    ]
+                }
+            }
+        },
+        {"name": "revoke-abc"},
+    ]
+    jobs = InvitationJobs(api, "/jobs/invite")
+    result = jobs.revoke(GUEST, OPERATION, "friend@example.com")
+    assert result["action"] == "revoke" and result["userId"] == GUEST
+    env = {
+        item["name"]: item["value"]
+        for item in api.arm.call_args.kwargs["json"]["containers"][0]["env"]
+    }
+    assert env["ACCESS_USER_ID"] == GUEST
+    assert env["ACCESS_ACTION"] == "revoke"
+    assert "INVITED_EMAIL" not in env
+    api.arm.reset_mock(side_effect=True)
+    api.arm.return_value = {"value": [execution()]}
+    with pytest.raises(RuntimeError, match="otra operacion"):
+        jobs.revoke(GUEST, OPERATION, "friend@example.com")
+    assert all(call.args[0] == "GET" for call in api.arm.call_args_list)
+
+
+@pytest.mark.parametrize("case", ["admin", "invalid-user", "csrf", "extra-field"])
+def test_portal_rejects_unsafe_revocations(portal, case):
+    client, jobs = portal
+    principal = GUEST
+    body = {"requestId": OPERATION}
+    expected = 403
+    if case == "admin":
+        principal = ADMIN
+    elif case == "invalid-user":
+        principal = "not-a-uuid"
+        expected = 400
+    elif case == "csrf":
+        client.headers["X-CSRF-Token"] = "incorrect"
+    else:
+        body["email"] = "untrusted@example.com"
+        expected = 400
+    assert client.post(f"/api/users/{principal}/revoke", json=body).status_code == expected
+    jobs.revoke.assert_not_called()
+
+
+def test_portal_starts_durable_revocation_and_lists_access(portal):
+    client, jobs = portal
+    assert client.get("/api/users").json() == {"users": [], "synchronized": True}
+    result = client.post(f"/api/users/{GUEST}/revoke", json={"requestId": OPERATION})
+    assert result.status_code == 202
+    jobs.revoke.assert_called_once_with(GUEST, OPERATION, "friend@example.com")
+    jobs.start.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_revoke_worker_never_invites_or_sends_mail(monkeypatch, capsys, failure):
+    for key, value in {
+        "ACCESS_ACTION": "revoke",
+        "ACCESS_USER_ID": GUEST,
+        "INVITATION_OPERATION_ID": OPERATION,
+        "GENERATOR_URL": APP_URL,
+        "GENERATOR_RESOURCE_ID": RESOURCE,
+        "ADMIN_USER_ID": ADMIN,
+    }.items():
+        monkeypatch.setenv(key, value)
+    manager = MagicMock()
+    if failure:
+        manager.revoke.side_effect = requests.HTTPError("Permission update failed")
+    monkeypatch.setattr(invitation_worker, "AccessManager", lambda *args: manager)
+    monkeypatch.setattr(invitation_worker, "DefaultAzureCredential", MagicMock())
+    email = MagicMock()
+    monkeypatch.setattr(invitation_worker, "EmailClient", email)
+    assert invitation_worker.run() == (1 if failure else 0)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == ("failed" if failure else "access_revoked")
+    manager.revoke.assert_called_once_with(GUEST)
+    manager.grant.assert_not_called()
+    email.assert_not_called()

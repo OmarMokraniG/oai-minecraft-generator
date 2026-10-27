@@ -107,6 +107,9 @@ if ($Phase -eq 'Foundation') {
         'Microsoft.App/containerApps/read', 'Microsoft.App/containerApps/write',
         'Microsoft.App/containerApps/authConfigs/read', 'Microsoft.App/containerApps/authConfigs/write'
     )
+    Ensure-CustomRole 'Minecraft Access Reader' @(
+        'Microsoft.App/containerApps/read', 'Microsoft.App/containerApps/authConfigs/read'
+    )
     Ensure-CustomRole 'Minecraft Invitation Job Starter' @(
         'Microsoft.App/jobs/read', 'Microsoft.App/jobs/start/action', 'Microsoft.App/jobs/executions/read'
     )
@@ -118,17 +121,24 @@ if ($Phase -eq 'Foundation') {
     $worker = Invoke-Azure (@('identity', 'show', '--name', 'id-minecraftgen-invite') + $groupArgs)
     Grant-Role $communicationId $worker.principalId 'Minecraft Invitation Email Sender'
     $graph = Invoke-Azure @('ad', 'sp', 'show', '--id', '00000003-0000-0000-c000-000000000000')
-    $assignmentsUrl = "https://graph.microsoft.com/v1.0/servicePrincipals/$($worker.principalId)/appRoleAssignments"
-    foreach ($permission in @('User.ReadBasic.All', 'User.Invite.All')) {
-        $role = @($graph.appRoles | Where-Object {
-            $_.value -eq $permission -and 'Application' -in $_.allowedMemberTypes
-        })
-        if ($role.Count -ne 1) { throw "Cannot resolve Graph application role $permission" }
-        $assigned = Invoke-Azure @('rest', '--method', 'GET', '--url', $assignmentsUrl)
-        if ($role[0].id -notin $assigned.value.appRoleId) {
-            Invoke-AzureJson -Method POST -Url $assignmentsUrl -Body @{
-                principalId = $worker.principalId; resourceId = $graph.id; appRoleId = $role[0].id
-            } | Out-Null
+    $reader = Invoke-Azure (@('identity', 'show', '--name', 'id-minecraftgen-admin') + $groupArgs)
+    foreach ($target in @(
+        @{ identity = $worker; permissions = @('User.ReadBasic.All', 'User.Invite.All') },
+        @{ identity = $reader; permissions = @('User.ReadBasic.All') }
+    )) {
+        $principal = $target.identity.principalId
+        $assignmentsUrl = "https://graph.microsoft.com/v1.0/servicePrincipals/$principal/appRoleAssignments"
+        foreach ($permission in $target.permissions) {
+            $role = @($graph.appRoles | Where-Object {
+                $_.value -eq $permission -and 'Application' -in $_.allowedMemberTypes
+            })
+            if ($role.Count -ne 1) { throw "Cannot resolve Graph application role $permission" }
+            $assigned = Invoke-Azure @('rest', '--method', 'GET', '--url', $assignmentsUrl)
+            if ($role[0].id -notin $assigned.value.appRoleId) {
+                Invoke-AzureJson -Method POST -Url $assignmentsUrl -Body @{
+                    principalId = $principal; resourceId = $graph.id; appRoleId = $role[0].id
+                } | Out-Null
+            }
         }
     }
     Write-Output 'Invitation email and managed identities provisioned.'
@@ -150,6 +160,7 @@ $generatorUrl = "https://$AppName.$($environmentResource.properties.defaultDomai
 $portalUrl = "https://$portalName.$($environmentResource.properties.defaultDomain)"
 $image = "$Registry.azurecr.io/minecraft-generator:$ImageTag"
 Grant-Role $webId $worker.principalId 'Minecraft Invitation Access Writer'
+Grant-Role $webId $portalIdentity.principalId 'Minecraft Access Reader'
 Invoke-AzureJson -Method PUT -Url "https://management.azure.com${jobId}?api-version=2025-01-01" -Body @{
     location = $Location
     identity = @{ type = 'UserAssigned'; userAssignedIdentities = @{ $worker.id = @{} } }
@@ -178,7 +189,8 @@ Grant-Role $jobId $portalIdentity.principalId 'Minecraft Invitation Job Starter'
 $variables = @(
     "AZURE_CLIENT_ID=$($portalIdentity.clientId)", "ADMIN_USER_ID=$ownerId",
     "PORTAL_BASE_URL=$portalUrl", "GENERATOR_URL=$generatorUrl",
-    "INVITATION_JOB_RESOURCE_ID=$jobId", 'APP_HEALTH_URL=http://127.0.0.1:8000/health'
+    "INVITATION_JOB_RESOURCE_ID=$jobId", "GENERATOR_RESOURCE_ID=$webId",
+    'APP_HEALTH_URL=http://127.0.0.1:8000/health'
 )
 $apps = @(Invoke-Azure (@('containerapp', 'list') + $groupArgs))
 if ($portalName -notin $apps.name) {

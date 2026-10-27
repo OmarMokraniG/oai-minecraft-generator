@@ -22,7 +22,14 @@ def run():
     logging.basicConfig(level=logging.WARNING)
     stage = "configuration"
     try:
-        recipient = normalize_email(os.environ["INVITED_EMAIL"])
+        action = os.getenv("ACCESS_ACTION", "invite")
+        if action not in {"invite", "revoke"}:
+            raise ValueError("Unsupported access operation")
+        target = (
+            normalize_email(os.environ["INVITED_EMAIL"])
+            if action == "invite"
+            else str(UUID(os.environ["ACCESS_USER_ID"]))
+        )
         operation = str(UUID(os.environ["INVITATION_OPERATION_ID"]))
         app_url = https_url(os.environ["GENERATOR_URL"])
         credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
@@ -33,11 +40,15 @@ def run():
             os.environ["ADMIN_USER_ID"],
             app_url,
         )
-        redeem_url = manager.grant(recipient)
+        if action == "revoke":
+            manager.revoke(target)
+            print(json.dumps({"status": "access_revoked", "operationId": operation}), flush=True)
+            return 0
+        redeem_url = manager.grant(target)
         stage = "email"
         with EmailClient(https_url(os.environ["EMAIL_ENDPOINT"]), credential) as client:
             result = client.begin_send(
-                invitation_message(recipient, app_url, os.environ["EMAIL_SENDER"], redeem_url),
+                invitation_message(target, app_url, os.environ["EMAIL_SENDER"], redeem_url),
                 operation_id=operation,
             ).result(timeout=180)
         if not result or result.get("status") != "Succeeded":

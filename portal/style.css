@@ -1,6 +1,6 @@
 :root { color-scheme: light; font-family: system-ui, sans-serif; color: #172a22; background: #f0f5f1; }
 body { margin: 0; }
-main { max-width: 760px; padding: 48px 24px; margin: auto; }
+main { max-width: 1000px; padding: 48px 24px; margin: auto; }
 h1 { font-size: clamp(2rem, 5vw, 2.8rem); line-height: 1.15; }
 h2 { font-size: 1.2rem; }
 p { line-height: 1.6; }
@@ -12,6 +12,13 @@ button { margin-top: 16px; padding: 14px 20px; border: 0; border-radius: 6px; co
 button:disabled { opacity: .55; cursor: wait; }
 a { color: #236d3c; }
 .muted { color: #56685d; font-size: .9rem; }
-#status[data-error="true"] { color: #a12121; }
+#status[data-error="true"], #users-status[data-error="true"] { color: #a12121; }
 ul { padding-left: 20px; }
 li { margin: 12px 0; overflow-wrap: anywhere; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; min-width: 660px; border-collapse: collapse; margin: 16px 0; font-size: .9rem; }
+th, td { padding: 12px 10px; text-align: left; border-bottom: 1px solid #d6e2d9; overflow-wrap: anywhere; }
+th { color: #56685d; }
+td button { margin: 0; padding: 10px 12px; font-size: .85rem; white-space: nowrap; }
+.danger { background: #a12121; }
+.protected { color: #277743; font-weight: 600; }

@@ -1,5 +1,6 @@
 import copy
 import html
+import logging
 import threading
 import time
 from urllib.parse import urlparse
@@ -12,6 +13,7 @@ ARM = "https://management.azure.com"
 GRAPH = "https://graph.microsoft.com/v1.0"
 API_VERSION = "2025-01-01"
 TERMINAL_STATES = {"Succeeded", "Failed", "Stopped"}
+logger = logging.getLogger(__name__)
 
 
 def normalize_email(value):
@@ -87,14 +89,72 @@ class AccessManager:
         self.administrator = str(UUID(administrator))
         self.app_url = https_url(app_url)
 
-    def grant(self, recipient):
-        auth_id = f"{self.resource_id}/authConfigs/current"
-        auth = self.api.arm("GET", auth_id)["properties"]
+    def authorization(self):
+        auth = self.api.arm("GET", f"{self.resource_id}/authConfigs/current")["properties"]
         if not auth["platform"]["enabled"]:
             raise ValueError("Application authentication must be enabled")
         aad = auth["identityProviders"]["azureActiveDirectory"]
         policy = aad["validation"]["defaultAuthorizationPolicy"]
         allowed = user_ids(policy["allowedPrincipals"]["identities"], self.administrator)
+        return auth, allowed
+
+    def describe_user(self, principal):
+        principal = str(UUID(principal))
+        try:
+            profile = self.api.request(
+                "GET",
+                f"{GRAPH}/users/{principal}",
+                params={"$select": "id,displayName,mail,userPrincipalName"},
+            )
+        except requests.HTTPError as error:
+            if error.response is None or error.response.status_code != 404:
+                raise
+            logger.warning("Authorized directory identity no longer exists: %s", principal)
+            return {
+                "id": principal,
+                "name": "Cuenta eliminada en Entra",
+                "email": None,
+                "isAdministrator": principal == self.administrator,
+                "directoryMissing": True,
+            }
+        if str(UUID(profile["id"])) != principal:
+            raise ValueError("Directory identity does not match the requested user")
+        upn = profile.get("userPrincipalName") or ""
+        email = profile.get("mail") or (upn if "#ext#" not in upn.lower() else None)
+        return {
+            "id": principal,
+            "name": profile.get("displayName") or email or principal,
+            "email": email,
+            "isAdministrator": principal == self.administrator,
+            "directoryMissing": False,
+        }
+
+    def users(self):
+        _, allowed = self.authorization()
+        env = self.api.arm("GET", self.resource_id)["properties"]["template"]["containers"][0][
+            "env"
+        ]
+        value = next(
+            (item.get("value", "") for item in env if item["name"] == "ALLOWED_USER_IDS"), ""
+        )
+        runtime = {str(UUID(item)) for item in value.split(",") if item}
+        users = []
+        for principal in sorted(set(allowed) | runtime):
+            user = self.describe_user(principal)
+            user["hasAccess"] = principal in allowed and principal in runtime
+            users.append(user)
+        users.sort(key=lambda user: (not user["isAdministrator"], user["name"].casefold()))
+        return {"users": users, "synchronized": set(allowed) == runtime}
+
+    def revoke(self, principal):
+        principal = str(UUID(principal))
+        if principal == self.administrator:
+            raise ValueError("No se puede revocar el acceso del administrador.")
+        auth, allowed = self.authorization()
+        self.synchronize(auth, [item for item in allowed if item != principal])
+
+    def grant(self, recipient):
+        auth, allowed = self.authorization()
         literal = recipient.replace("'", "''")
         users = self.api.request(
             "GET",
@@ -127,7 +187,14 @@ class AccessManager:
                 "invitations.microsoft.com",
             }:
                 raise ValueError("Unexpected invitation redemption host")
-        allowed = user_ids([*allowed, principal], self.administrator)
+        self.synchronize(auth, [*allowed, principal])
+        return redeem_url
+
+    def synchronize(self, auth, values):
+        auth_id = f"{self.resource_id}/authConfigs/current"
+        allowed = user_ids(values, self.administrator)
+        aad = auth["identityProviders"]["azureActiveDirectory"]
+        policy = aad["validation"]["defaultAuthorizationPolicy"]
         policy["allowedPrincipals"]["identities"] = allowed
         login = aad.setdefault("login", {})
         parameters = [
@@ -155,7 +222,6 @@ class AccessManager:
         ]["validation"]["defaultAuthorizationPolicy"]["allowedPrincipals"]["identities"]
         if user_ids(updated, self.administrator) != allowed:
             raise RuntimeError("Authorization changed concurrently; inspect access before retrying")
-        return redeem_url
 
     def wait_ready(self, allowed, timeout=360):
         deadline = time.monotonic() + timeout
@@ -248,16 +314,32 @@ class InvitationJobs:
             "email": values.get("INVITED_EMAIL", ""),
             "requestId": values.get("INVITATION_OPERATION_ID", ""),
             "started": properties.get("startTime"),
+            "action": values.get("ACCESS_ACTION", "invite"),
+            "userId": values.get("ACCESS_USER_ID", ""),
+            "label": values.get("ACCESS_USER_LABEL") or values.get("INVITED_EMAIL", ""),
         }
 
     def start(self, email, request_id):
+        return self.start_operation("invite", email, request_id, email)
+
+    def revoke(self, principal, request_id, label):
+        return self.start_operation("revoke", str(UUID(principal)), request_id, label)
+
+    def start_operation(self, action, target, request_id, label):
         with self.lock:
             existing = [self.summary(item) for item in self.executions()]
             duplicate = next((item for item in existing if item["requestId"] == request_id), None)
             if duplicate:
+                previous = duplicate["userId"] if action == "revoke" else duplicate["email"]
+                if duplicate["action"] != action or previous.casefold() != target.casefold():
+                    raise RuntimeError(
+                        "Esta solicitud corresponde a otra operacion. Recarga el portal."
+                    )
                 return duplicate
             if any(item["status"] not in TERMINAL_STATES for item in existing):
-                raise RuntimeError("Hay otra invitacion en curso. Espera a que termine.")
+                raise RuntimeError(
+                    "Hay otra invitacion u operacion de acceso en curso. Espera a que termine."
+                )
             source = self.api.arm("GET", self.resource_id)["properties"]["template"]
             template = copy.deepcopy(
                 {key: source[key] for key in ("containers", "initContainers") if source.get(key)}
@@ -277,11 +359,23 @@ class InvitationJobs:
             env[:] = [
                 item
                 for item in env
-                if item["name"] not in {"INVITED_EMAIL", "INVITATION_OPERATION_ID"}
+                if item["name"]
+                not in {
+                    "INVITED_EMAIL",
+                    "INVITATION_OPERATION_ID",
+                    "ACCESS_ACTION",
+                    "ACCESS_USER_ID",
+                    "ACCESS_USER_LABEL",
+                }
             ]
             env.extend(
                 [
-                    {"name": "INVITED_EMAIL", "value": email},
+                    {"name": "ACCESS_ACTION", "value": action},
+                    {"name": "ACCESS_USER_LABEL", "value": label},
+                    {
+                        "name": "INVITED_EMAIL" if action == "invite" else "ACCESS_USER_ID",
+                        "value": target,
+                    },
                     {"name": "INVITATION_OPERATION_ID", "value": request_id},
                 ]
             )
@@ -289,7 +383,10 @@ class InvitationJobs:
             return {
                 "id": execution["name"],
                 "status": "Processing",
-                "email": email,
+                "email": target if action == "invite" else "",
+                "action": action,
+                "userId": target if action == "revoke" else "",
+                "label": label,
                 "requestId": request_id,
                 "started": None,
             }

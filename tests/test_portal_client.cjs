@@ -6,16 +6,23 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "..", "portal", "portal.js"), "utf8");
 
-async function portal(respond, initialStorage = {}) {
+async function portal(respond, initialStorage = {}, confirm = () => true) {
   const elements = new Map();
-  function element(id) {
-    if (!elements.has(id)) elements.set(id, {
-      textContent: "", dataset: {}, disabled: true, hidden: true, value: "friend@example.com",
+  function newElement() {
+    return {
+      textContent: "", dataset: {}, disabled: true, hidden: true, value: "",
       children: [], listeners: {},
       replaceChildren() { this.children = []; },
       appendChild(child) { this.children.push(child); },
       addEventListener(event, callback) { this.listeners[event] = callback; }
-    });
+    };
+  }
+  function element(id) {
+    if (!elements.has(id)) {
+      const item = newElement();
+      if (id === "email") item.value = "friend@example.com";
+      elements.set(id, item);
+    }
     return elements.get(id);
   }
   const storage = new Map(Object.entries(initialStorage));
@@ -23,13 +30,13 @@ async function portal(respond, initialStorage = {}) {
   const calls = [];
   const timers = [];
   const context = vm.createContext({
-    document: { getElementById: element, createElement: element },
+    document: { getElementById: element, createElement: newElement },
     sessionStorage: {
       getItem: key => storage.get(key) ?? null,
       setItem: (key, value) => storage.set(key, value),
       removeItem: key => storage.delete(key)
     },
-    window: { location: { assign: url => redirects.push(url) } },
+    window: { location: { assign: url => redirects.push(url) }, confirm },
     crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
     setTimeout: (callback, delay) => { timers.push({ callback, delay }); return timers.length; },
     clearTimeout: () => {},
@@ -44,6 +51,7 @@ async function portal(respond, initialStorage = {}) {
 }
 
 function normalResponse(url) {
+  if (url === "/api/users") return Response.json({ users: [], synchronized: true });
   return Response.json(url === "/api/session"
     ? { csrf: "test-csrf", generatorUrl: "https://generator.example.com" }
     : { invitations: [] });
@@ -111,13 +119,72 @@ test("an unconfirmed submission is not replaced by an older successful invitatio
   const app = await portal((url, options) => {
     if (options.method === "POST") return new Response(null, { status: 503 });
     if (url === "/api/session") return normalResponse(url);
+    if (url === "/api/users") return normalResponse(url);
     return Response.json({ invitations: [{
       id: "old-invite", email: "older@example.com", status: "Succeeded", requestId: "older"
     }] });
   });
+
   await app.element("invite-form").listeners.submit({ preventDefault() {} });
   await vm.runInContext("poll()", app.context);
   assert.match(app.element("status").textContent, /No se ha confirmado la invitacion a friend@example.com/);
   assert.equal(app.element("submit").disabled, false);
   assert.equal(app.calls.filter(call => call.options.method === "POST").length, 1);
+});
+
+const userRecords = [
+  { id: "admin-id", name: "Administrator", email: "admin@example.com", hasAccess: true, isAdministrator: true },
+  { id: "guest-id", name: "Friend", email: "friend@example.com", hasAccess: true, isAdministrator: false }
+];
+
+function usersResponse(url) {
+  return url === "/api/users" ? Response.json({ users: userRecords, synchronized: true }) : normalResponse(url);
+}
+
+test("user management protects the administrator and filters by name or email", async () => {
+  const app = await portal(usersResponse);
+  const rows = app.element("users").children;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].children[3].textContent, "Protegido");
+  assert.equal(rows[0].children[3].children.length, 0);
+  assert.equal(rows[1].children[3].children[0].textContent, "Revocar acceso");
+  app.element("user-search").value = "FRIEND@EXAMPLE";
+  app.element("user-search").listeners.input();
+  assert.equal(app.element("users").children.length, 1);
+  assert.equal(app.element("users").children[0].children[0].textContent, "Friend");
+});
+
+test("cancelling the revocation confirmation makes no mutation request", async () => {
+  const app = await portal(usersResponse, {}, () => false);
+  await app.element("users").children[1].children[3].children[0].listeners.click();
+  assert.equal(app.calls.filter(call => call.options.method === "POST").length, 0);
+});
+
+test("confirmed revocation posts only a request ID and does not report an email send", async () => {
+  let submitted = false;
+  const app = await portal((url, options) => {
+    if (options.method === "POST") {
+      submitted = true;
+      return Response.json({ id: "remove-abc", status: "Succeeded", action: "revoke" }, { status: 202 });
+    }
+    if (submitted && url === "/api/invitations") return Response.json({ invitations: [{
+      id: "remove-abc", requestId: "11111111-1111-4111-8111-111111111111",
+      status: "Succeeded", action: "revoke", userId: "guest-id", label: "friend@example.com"
+    }] });
+    return usersResponse(url);
+  });
+  await app.element("users").children[1].children[3].children[0].listeners.click();
+  const posted = app.calls.find(call => call.options.method === "POST");
+  assert.equal(posted.url, "/api/users/guest-id/revoke");
+  assert.deepEqual(JSON.parse(posted.options.body), { requestId: "11111111-1111-4111-8111-111111111111" });
+  assert.match(app.element("status").textContent, /Acceso revocado/);
+  assert(!app.element("status").textContent.includes("correo enviado"));
+});
+
+test("a user-directory error stays visible instead of becoming an empty successful list", async () => {
+  const app = await portal(url => url === "/api/users"
+    ? new Response(null, { status: 502 }) : normalResponse(url));
+  assert.match(app.element("users-status").textContent, /No se pudieron cargar.*HTTP 502/);
+  assert.equal(app.element("users-status").dataset.error, "true");
+  assert.equal(app.element("refresh-users").disabled, false);
 });
