@@ -13,6 +13,7 @@ from azure.storage.blob import (
 class BlobStorageClient:
     def __init__(self, settings, service_client=None):
         self.container_name = settings.container_name
+        self.download_base_url = settings.download_base_url
         self.blob_service_client = (
             service_client
             if service_client is not None
@@ -57,4 +58,6 @@ class BlobStorageClient:
             protocol="https",
         )
         blob = self.blob_service_client.get_blob_client(self.container_name, blob_name)
+        if self.download_base_url:
+            return f"{self.download_base_url}/images/{blob_name}?{token}"
         return f"{blob.url}?{token}"

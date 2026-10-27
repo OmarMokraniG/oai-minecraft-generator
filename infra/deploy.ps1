@@ -8,9 +8,11 @@ param(
     [string]$FoundryAccount = 'f-minecraft-001',
     [string]$StorageAccount = 'staminecraftgen',
     [string]$Registry = 'crminecraftgenom4',
-    [string]$Environment = 'env-minecraftgen-001',
+    [string]$Environment = 'env-minecraftgen-private-001',
     [string]$Identity = 'id-minecraftgen-001',
-    [string]$AppName = 'ca-minecraftgen-001',
+    [string]$DownloadIdentity = 'id-minecraftgen-download-001',
+    [string]$AppName = 'ca-minecraftgen-web',
+    [string]$DownloadAppName = 'ca-minecraftgen-download',
     [string]$ImageModel = 'gpt-image-2.5-sunburst',
     [string]$ImageVersion = '2026-09-08',
     [string]$VisionModel = 'gpt-6.1-sol',
@@ -80,10 +82,46 @@ if ($Phase -in @('Foundation', 'All')) {
     Grant-Role "$resourcePrefix/Microsoft.Storage/storageAccounts/$StorageAccount" `
         $managedIdentity.principalId 'Storage Blob Data Contributor'
 
-    # QR downloads require a reachable endpoint, not anonymous containers or account keys.
     Invoke-Azure (@('storage', 'account', 'update', '--name', $StorageAccount,
-        '--public-network-access', 'Enabled', '--allow-blob-public-access', 'false') +
+        '--public-network-access', 'Disabled', '--allow-blob-public-access', 'false') +
         $groupArgs) | Out-Null
+
+    $vnetName = 'vnet-minecraftgen-001'
+    $vnets = @(Invoke-Azure (@('network', 'vnet', 'list') + $groupArgs))
+    if ($vnetName -notin $vnets.name) {
+        Invoke-Azure (@('network', 'vnet', 'create', '--name', $vnetName,
+            '--location', $Location, '--address-prefixes', '10.87.0.0/16',
+            '--subnet-name', 'aca', '--subnet-prefixes', '10.87.0.0/23') + $groupArgs) |
+            Out-Null
+        Invoke-Azure (@('network', 'vnet', 'subnet', 'update', '--vnet-name', $vnetName,
+            '--name', 'aca', '--delegations', 'Microsoft.App/environments') + $groupArgs) |
+            Out-Null
+        Invoke-Azure (@('network', 'vnet', 'subnet', 'create', '--vnet-name', $vnetName,
+            '--name', 'private-endpoints', '--address-prefixes', '10.87.2.0/27',
+            '--private-endpoint-network-policies', 'Disabled') + $groupArgs) | Out-Null
+    }
+    $zone = 'privatelink.blob.core.windows.net'
+    $zones = @(Invoke-Azure (@('network', 'private-dns', 'zone', 'list') + $groupArgs))
+    if ($zone -notin $zones.name) {
+        Invoke-Azure (@('network', 'private-dns', 'zone', 'create', '--name', $zone) +
+            $groupArgs) | Out-Null
+        Invoke-Azure (@('network', 'private-dns', 'link', 'vnet', 'create',
+            '--zone-name', $zone, '--name', 'minecraft-vnet',
+            '--virtual-network', "$resourcePrefix/Microsoft.Network/virtualNetworks/$vnetName",
+            '--registration-enabled', 'false') + $groupArgs) | Out-Null
+    }
+    $endpoints = @(Invoke-Azure (@('network', 'private-endpoint', 'list') + $groupArgs))
+    if ('pe-minecraft-blob' -notin $endpoints.name) {
+        Invoke-Azure (@('network', 'private-endpoint', 'create', '--name', 'pe-minecraft-blob',
+            '--location', $Location, '--vnet-name', $vnetName, '--subnet', 'private-endpoints',
+            '--private-connection-resource-id',
+            "$resourcePrefix/Microsoft.Storage/storageAccounts/$StorageAccount",
+            '--group-id', 'blob', '--connection-name', 'minecraft-blob') + $groupArgs) | Out-Null
+        Invoke-Azure (@('network', 'private-endpoint', 'dns-zone-group', 'create',
+            '--endpoint-name', 'pe-minecraft-blob', '--name', 'default',
+            '--private-dns-zone', "$resourcePrefix/Microsoft.Network/privateDnsZones/$zone",
+            '--zone-name', 'blob') + $groupArgs) | Out-Null
+    }
 
     $registries = @(Invoke-Azure (@('acr', 'list') + $groupArgs))
     if ($Registry -notin $registries.name) {
@@ -92,6 +130,14 @@ if ($Phase -in @('Foundation', 'All')) {
     }
     Grant-Role "$resourcePrefix/Microsoft.ContainerRegistry/registries/$Registry" `
         $managedIdentity.principalId 'AcrPull'
+    if ($DownloadIdentity -notin $identities.name) {
+        Invoke-Azure (@('identity', 'create', '--name', $DownloadIdentity,
+            '--location', $Location) + $groupArgs) | Out-Null
+    }
+    $downloadIdentityResource = Invoke-Azure (@('identity', 'show', '--name', $DownloadIdentity) +
+        $groupArgs)
+    Grant-Role "$resourcePrefix/Microsoft.ContainerRegistry/registries/$Registry" `
+        $downloadIdentityResource.principalId 'AcrPull'
 
     $environments = @(Invoke-Azure (@('containerapp', 'env', 'list') + $groupArgs))
     if ($Environment -notin $environments.name) {
@@ -103,6 +149,8 @@ if ($Phase -in @('Foundation', 'All')) {
         Invoke-Azure (@('containerapp', 'env', 'create', '--name', $Environment,
             '--location', $Location, '--logs-workspace-id', $workspace.customerId,
             '--logs-workspace-key', $workspaceKeys.primarySharedKey,
+            '--infrastructure-subnet-resource-id',
+            "$resourcePrefix/Microsoft.Network/virtualNetworks/$vnetName/subnets/aca",
             '--environment-mode', 'WorkloadProfiles') + $groupArgs) | Out-Null
         $workspaceKeys = $null
     }
@@ -114,16 +162,20 @@ if ($Phase -eq 'Foundation') {
 }
 
 $managedIdentity = Invoke-Azure (@('identity', 'show', '--name', $Identity) + $groupArgs)
+$downloadIdentityResource = Invoke-Azure (@('identity', 'show', '--name', $DownloadIdentity) +
+    $groupArgs)
 $environmentResource = Invoke-Azure (@('containerapp', 'env', 'show',
     '--name', $Environment) + $groupArgs)
 $image = "$Registry.azurecr.io/minecraft-generator:$ImageTag"
 $url = "https://$AppName.$($environmentResource.properties.defaultDomain)"
+$downloadUrl = "https://$DownloadAppName.$($environmentResource.properties.defaultDomain)"
 $appVariables = @(
     "AZURE_CLIENT_ID=$($managedIdentity.clientId)",
     "AZURE_OPENAI_ENDPOINT=https://$FoundryAccount.openai.azure.com",
     "AZURE_IMAGE_DEPLOYMENT=$ImageModel",
     "AZURE_VISION_DEPLOYMENT=$VisionModel",
     "AZURE_STORAGE_ACCOUNT_URL=https://$StorageAccount.blob.core.windows.net",
+    "PUBLIC_DOWNLOAD_BASE_URL=$downloadUrl",
     'REQUIRE_AUTH=true',
     "ALLOWED_USER_IDS=$ownerId"
 )
@@ -140,6 +192,22 @@ if (-not $SkipBuild) {
 }
 
 $apps = @(Invoke-Azure (@('containerapp', 'list') + $groupArgs))
+if ($DownloadAppName -notin $apps.name) {
+    Invoke-Azure (@('containerapp', 'create', '--name', $DownloadAppName,
+        '--environment', $environmentResource.id, '--image', $image,
+        '--registry-server', "$Registry.azurecr.io",
+        '--registry-identity', $downloadIdentityResource.id,
+        '--user-assigned', $downloadIdentityResource.id,
+        '--ingress', 'external', '--target-port', '8000', '--transport', 'http',
+        '--cpu', '0.25', '--memory', '0.5Gi', '--min-replicas', '0', '--max-replicas', '1',
+        '--command', 'python', '--args', 'download_app.py',
+        '--env-vars', "AZURE_STORAGE_ACCOUNT_URL=https://$StorageAccount.blob.core.windows.net",
+        'APP_HEALTH_URL=http://127.0.0.1:8000/health') +
+        $groupArgs) | Out-Null
+} else {
+    Invoke-Azure (@('containerapp', 'update', '--name', $DownloadAppName, '--image', $image) +
+        $groupArgs) | Out-Null
+}
 if ($AppName -notin $apps.name) {
     Invoke-Azure (@('containerapp', 'create', '--name', $AppName,
         '--environment', $environmentResource.id, '--image', $image,
@@ -166,6 +234,8 @@ if ($registrations.Count -eq 0) {
         '--enable-id-token-issuance', 'true')
 } else {
     $registration = $registrations[0]
+    Invoke-Azure @('ad', 'app', 'update', '--id', $registration.id,
+        '--web-redirect-uris', "$url/.auth/login/aad/callback") | Out-Null
 }
 $principals = @(Invoke-Azure @('ad', 'sp', 'list',
     '--filter', "appId eq '$($registration.appId)'"))
@@ -276,4 +346,5 @@ Invoke-Azure (@('containerapp', 'ingress', 'enable', '--name', $AppName,
     visionModel = $VisionModel
     identityId = $managedIdentity.id
     loginAppId = $registration.appId
+    downloadUrl = $downloadUrl
 } | ConvertTo-Json

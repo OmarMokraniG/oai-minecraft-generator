@@ -47,3 +47,19 @@ def test_signing_failure_is_not_replaced_with_an_unsigned_url():
     service.get_user_delegation_key.side_effect = HttpResponseError("Denied")
     with pytest.raises(HttpResponseError):
         storage.get_blob_url("test.png")
+
+
+def test_private_storage_link_is_served_through_download_gateway():
+    settings = Settings(
+        "https://ai.example",
+        "image",
+        "vision",
+        "https://private.blob.core.windows.net",
+        download_base_url="https://download.example",
+    )
+    service = MagicMock(account_name="private")
+    storage = BlobStorageClient(settings, service)
+    with patch("blob_storage_client.generate_blob_sas", return_value="sp=r&sig=signed"):
+        assert storage.get_blob_url("test.png") == (
+            "https://download.example/images/test.png?sp=r&sig=signed"
+        )

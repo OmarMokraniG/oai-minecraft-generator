@@ -14,6 +14,7 @@ class Settings:
     vision_deployment: str
     storage_url: str
     container_name: str = "minecraft"
+    download_base_url: str = ""
 
     @classmethod
     def from_env(cls):
@@ -31,9 +32,15 @@ class Settings:
             parsed = urlparse(values[name])
             if parsed.scheme != "https" or not parsed.hostname:
                 raise ValueError(f"{name} must be an HTTPS URL")
+        download_url = os.getenv("PUBLIC_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
+        if download_url and (
+            urlparse(download_url).scheme != "https" or not urlparse(download_url).hostname
+        ):
+            raise ValueError("PUBLIC_DOWNLOAD_BASE_URL must be an HTTPS URL")
         return cls(
             endpoint=values[names[0]].rstrip("/"),
             image_deployment=values[names[1]],
             vision_deployment=values[names[2]],
             storage_url=values[names[3]].rstrip("/"),
+            download_base_url=download_url,
         )

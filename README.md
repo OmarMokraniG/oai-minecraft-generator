@@ -8,7 +8,7 @@ The original MIT license and attribution are preserved in `LICENSE`.
 
 ## Open the application
 
-[Minecraft Character Studio](https://ca-minecraftgen-001.livelydune-c908fb62.swedencentral.azurecontainerapps.io/)
+[Minecraft Character Studio](https://ca-minecraftgen-web.jollyocean-203dead9.swedencentral.azurecontainerapps.io/)
 
 Sign in with the Microsoft account authorized for this deployment. The interface
 supports descriptions, webcam capture and uploaded photos. No local installation
@@ -17,8 +17,10 @@ is needed. Browser camera access requires permission and HTTPS.
 ## Azure deployment
 
 The deployment uses the existing resource group `rg-minecraftgenerator-001` in
-Sweden Central. It adds a Consumption Azure Container App (0-1 replicas), a Basic
-Azure Container Registry, a managed identity and a Log Analytics workspace.
+Sweden Central. It adds Consumption Azure Container Apps for the web interface
+and signed downloads (each 0-1 replicas), a Basic Azure Container Registry,
+managed identities, a Log Analytics workspace, and a VNet with a Storage private
+endpoint and private DNS.
 The existing Foundry account and storage account are reused without deleting
 their other resources or deployments.
 
@@ -28,7 +30,9 @@ their other resources or deployments.
 - Service authentication: managed identity and resource-scoped RBAC. No model
   API keys or storage connection strings are used.
 - Sharing: private blobs with HTTPS-only, read-only user-delegation SAS links
-  that expire after one hour. Anonymous container access remains disabled.
+  that expire after one hour, served through a small download gateway. Storage
+  validates the signature through its private endpoint. The gateway has no model
+  or storage RBAC role and never substitutes its own credentials.
 - Photos: resized, stripped of metadata and sent to the vision model with
   `store=False`; the application does not persist the original photo.
 
@@ -57,9 +61,11 @@ resource group, deploy the selected models, and register an Entra application.
 The model/version parameters must match the live catalog and available quota.
 Regional model capacity and availability are checked during provisioning.
 
-The storage public **network endpoint** is enabled so that signed QR links can
-be opened from phones. This does not enable public blobs: image access still
-requires a valid signature. Original photos are never uploaded.
+Storage public network access and anonymous blob access remain **disabled**.
+Both applications reach it through the VNet/private endpoint. Signed QR links
+open the HTTPS download gateway from phones, without exposing Storage to the
+internet or bypassing the subscription's network policy. The gateway disables
+query-string access logs so SAS signatures are not logged.
 
 The Entra login client secret is stored only as a Container Apps secret and
 expires one year after initial deployment. Rotate it in Entra and update the
@@ -99,8 +105,9 @@ Container Apps authentication and an `ALLOWED_USER_IDS` allowlist.
 
 ## Costs and limitations
 
-The container scales to zero when idle; registry storage and Log Analytics can
-still incur charges. Models are consumption-billed per request. High-quality
+Both containers scale to zero when idle; registry storage, private endpoints,
+private DNS, networking and Log Analytics can still incur charges. Models are
+consumption-billed per request. High-quality
 image generation can take one or two minutes. Only one generation runs at a time,
 and per-session cooldown plus the deployed model quota limit request volume.
 The app's in-memory result disappears if the session/container restarts; download
