@@ -13,6 +13,4 @@ htmlcov/
 .vscode/
 .venv/
 .ruff_cache/
-tests/
 infra/
-requirements-dev.txt

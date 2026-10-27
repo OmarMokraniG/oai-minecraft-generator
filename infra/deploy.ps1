@@ -15,7 +15,8 @@ param(
     [string]$ImageVersion = '2026-09-08',
     [string]$VisionModel = 'gpt-6.1-sol',
     [string]$VisionVersion = '2026-09-29',
-    [string]$ImageTag = (Get-Date -Format 'yyyyMMddHHmmss')
+    [string]$ImageTag = (Get-Date -Format 'yyyyMMddHHmmss'),
+    [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,13 +128,15 @@ $appVariables = @(
     "ALLOWED_USER_IDS=$ownerId"
 )
 
-Push-Location $root
-try {
-    Invoke-Azure (@('acr', 'build', '--no-logs', '--registry', $Registry,
-        '--image', "minecraft-generator:$ImageTag", '--file', 'Dockerfile', '.') +
-        $subscriptionArgs) | Out-Null
-} finally {
-    Pop-Location
+if (-not $SkipBuild) {
+    Push-Location $root
+    try {
+        Invoke-Azure (@('acr', 'build', '--no-logs', '--registry', $Registry,
+            '--image', "minecraft-generator:$ImageTag", '--file', 'Dockerfile', '.') +
+            $subscriptionArgs) | Out-Null
+    } finally {
+        Pop-Location
+    }
 }
 
 $apps = @(Invoke-Azure (@('containerapp', 'list') + $groupArgs))
@@ -188,15 +191,23 @@ $manifest = @{
             userConsentDisplayName = 'Access Minecraft Generator'
             userConsentDescription = 'Access Minecraft Generator as you.'
         })
-        preAuthorizedApplications = @(@{
-            appId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
-            delegatedPermissionIds = @($scopeId)
-        })
     }
 }
 $manifestFile = Join-Path ([System.IO.Path]::GetTempPath()) "minecraft-manifest-$PID.json"
 try {
     $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $manifestFile -Encoding utf8
+    Invoke-Azure @('rest', '--method', 'PATCH',
+        '--url', "https://graph.microsoft.com/v1.0/applications/$($registration.id)",
+        '--body', "@$manifestFile") | Out-Null
+    # Graph must persist the scope before it can validate client preauthorization.
+    @{
+        api = @{
+            preAuthorizedApplications = @(@{
+                appId = '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+                delegatedPermissionIds = @($scopeId)
+            })
+        }
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestFile -Encoding utf8
     Invoke-Azure @('rest', '--method', 'PATCH',
         '--url', "https://graph.microsoft.com/v1.0/applications/$($registration.id)",
         '--body', "@$manifestFile") | Out-Null
@@ -219,7 +230,7 @@ $auth = @{
         platform = @{ enabled = $true }
         globalValidation = @{
             unauthenticatedClientAction = 'RedirectToLoginPage'
-            redirectToProvider = 'azureactivedirectory'
+            redirectToProvider = 'aad'
         }
         identityProviders = @{
             azureActiveDirectory = @{
@@ -231,7 +242,13 @@ $auth = @{
                 }
                 validation = @{
                     allowedAudiences = @($registration.appId, "api://$($registration.appId)")
-                    defaultAuthorizationPolicy = @{ allowedPrincipals = @{ identities = @($ownerId) } }
+                    defaultAuthorizationPolicy = @{
+                        allowedApplications = @(
+                            $registration.appId,
+                            '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
+                        )
+                        allowedPrincipals = @{ identities = @($ownerId) }
+                    }
                 }
             }
         }

@@ -6,6 +6,14 @@ character, with PNG downloads and expiring QR sharing links.
 Based on [drhelius/oai-minecraft-generator](https://github.com/drhelius/oai-minecraft-generator).
 The original MIT license and attribution are preserved in `LICENSE`.
 
+## Open the application
+
+[Minecraft Character Studio](https://ca-minecraftgen-001.livelydune-c908fb62.swedencentral.azurecontainerapps.io/)
+
+Sign in with the Microsoft account authorized for this deployment. The interface
+supports descriptions, webcam capture and uploaded photos. No local installation
+is needed. Browser camera access requires permission and HTTPS.
+
 ## Azure deployment
 
 The deployment uses the existing resource group `rg-minecraftgenerator-001` in
@@ -32,12 +40,17 @@ tenant/subscription, and run in PowerShell:
 ```
 
 The script prints the application URL and model deployment names, not secrets.
+The cloud image build runs lint, formatting checks and all unit/UI tests on
+Python 3.12 before producing the runtime image. A failing check prevents release.
 It can also run the `Foundation` and `Release` phases separately:
 
 ```powershell
 .\infra\deploy.ps1 -Phase Foundation
 .\infra\deploy.ps1 -Phase Release
 ```
+
+To resume configuration after a failed release without rebuilding an already
+verified image, supply its tag with `-ImageTag <tag> -SkipBuild`.
 
 Deployment requires permission to create resources and role assignments in the
 resource group, deploy the selected models, and register an Entra application.
