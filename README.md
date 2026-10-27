@@ -14,6 +14,11 @@ Sign in with the Microsoft account authorized for this deployment. The interface
 supports descriptions, webcam capture and uploaded photos. No local installation
 is needed. Browser camera access requires permission and HTTPS.
 
+If your browser has another Microsoft account signed in, use
+[Choose the deployment account](https://ca-minecraftgen-web.jollyocean-203dead9.swedencentral.azurecontainerapps.io/.auth/login/aad?post_login_redirect_uri=%2F).
+The sign-in flow explicitly offers account selection and suggests the configured
+administrator account; other users remain blocked.
+
 ## Azure deployment
 
 The deployment uses the existing resource group `rg-minecraftgenerator-001` in
@@ -26,7 +31,7 @@ their other resources or deployments.
 
 - Image generation: `gpt-image-2.5-sunburst` (`2026-09-08`).
 - Photo analysis: `gpt-6.1-sol` (`2026-09-29`) via the Responses API.
-- Sign-in: single-tenant Microsoft Entra ID, restricted to the deploying user.
+- Sign-in: single-tenant Microsoft Entra ID, restricted to the configured administrator.
 - Service authentication: managed identity and resource-scoped RBAC. No model
   API keys or storage connection strings are used.
 - Sharing: private blobs with HTTPS-only, read-only user-delegation SAS links
@@ -42,6 +47,12 @@ tenant/subscription, and run in PowerShell:
 ```powershell
 .\infra\deploy.ps1
 ```
+
+The script's `DeploymentAccount` parameter defaults to this deployment's Azure
+administrator. It verifies both the Azure CLI and Microsoft Graph user before
+provisioning, selects the target subscription, and refuses to deploy under a
+different account. Runtime service access still uses managed identities, not the
+administrator's credentials.
 
 The script prints the application URL and model deployment names, not secrets.
 The cloud image build runs lint, formatting checks and all unit/UI tests on
@@ -79,7 +90,11 @@ python -m venv .venv
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\ruff.exe format --check .
 .\.venv\Scripts\python.exe -m pytest -q
+.\tests\test_deploy.ps1
 ```
+
+The PowerShell deployment tests mock Azure CLI and check that mismatched accounts
+are rejected before any cloud resource operations.
 
 `scripts\smoke_test.py` performs real image generation, private blob upload,
 signed/unsigned download checks, vision analysis, and a second generation from

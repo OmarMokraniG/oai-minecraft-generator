@@ -3,6 +3,7 @@ param(
     [ValidateSet('Foundation', 'Release', 'All')]
     [string]$Phase = 'All',
     [string]$Subscription = 'ae027918-9050-4f80-ae04-199387d603ad',
+    [string]$DeploymentAccount = 'admin@MngEnvMCAP274168.onmicrosoft.com',
     [string]$ResourceGroup = 'rg-minecraftgenerator-001',
     [string]$Location = 'swedencentral',
     [string]$FoundryAccount = 'f-minecraft-001',
@@ -49,7 +50,14 @@ function Grant-Role {
 }
 
 $account = Invoke-Azure @('account', 'show', '--subscription', $Subscription)
+if ($account.user.type -ne 'user' -or $account.user.name -ine $DeploymentAccount) {
+    throw "Sign in to Azure CLI as $DeploymentAccount in tenant $($account.tenantId) before deploying."
+}
+Invoke-Azure @('account', 'set', '--subscription', $Subscription) | Out-Null
 $signedIn = Invoke-Azure @('ad', 'signed-in-user', 'show')
+if ($signedIn.userPrincipalName -ine $DeploymentAccount) {
+    throw 'The Microsoft Graph session does not match the configured deployment account.'
+}
 $ownerId = $signedIn.id
 $subscriptionArgs = @('--subscription', $Subscription)
 $groupArgs = @('--resource-group', $ResourceGroup) + $subscriptionArgs
@@ -305,6 +313,12 @@ $auth = @{
         identityProviders = @{
             azureActiveDirectory = @{
                 enabled = $true
+                login = @{
+                    loginParameters = @(
+                        "login_hint=$DeploymentAccount",
+                        'prompt=select_account'
+                    )
+                }
                 registration = @{
                     clientId = $registration.appId
                     clientSecretSettingName = 'entra-client-secret'
