@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import threading
@@ -37,6 +38,38 @@ def require_user():
     return principal
 
 
+def analyze_photo(analyzer, generation_lock, photo):
+    fingerprint = hashlib.sha256(photo).hexdigest() if photo else None
+    if fingerprint != st.session_state.get("photo_fingerprint"):
+        st.session_state.pop("photo_analysis", None)
+        st.session_state.pop("photo_attempted", None)
+        st.session_state.photo_fingerprint = fingerprint
+
+    retry = st.button("Volver a analizar", disabled=photo is None)
+    if photo is not None and (retry or st.session_state.get("photo_attempted") != fingerprint):
+        st.session_state.photo_attempted = fingerprint
+        if time.monotonic() - st.session_state.get("last_photo_attempt", -60) < 30:
+            st.warning("Espera 30 segundos y pulsa Volver a analizar.")
+        elif not generation_lock.acquire(blocking=False):
+            st.warning("Hay otra operacion en curso. Pulsa Volver a analizar cuando termine.")
+        else:
+            st.session_state.last_photo_attempt = time.monotonic()
+            st.session_state.pop("photo_analysis", None)
+            try:
+                with st.spinner("Analizando lo que ve la camara..."):
+                    st.session_state.photo_analysis = analyzer.analyze_face(photo)
+            except (OpenAIError, AzureError, ValueError, OSError):
+                logger.exception("Photo analysis failed")
+                st.error("No se pudo analizar la foto. Pulsa Volver a analizar para reintentarlo.")
+            finally:
+                generation_lock.release()
+    analysis = st.session_state.get("photo_analysis")
+    if analysis:
+        st.subheader("Lo que ve la IA")
+        st.info(analysis)
+    return analysis
+
+
 def main():
     require_user()
     st.title("⛏️ Minecraft Character Studio")
@@ -65,7 +98,6 @@ def main():
 
     text_tab, photo_tab = st.tabs(["Desde una descripcion", "Desde una foto"])
     description = None
-    photo = None
     add_frame = True
     with text_tab:
         with st.form("text_generation"):
@@ -85,25 +117,34 @@ def main():
 
     with photo_tab:
         use_camera = st.checkbox("Usar la webcam")
-        with st.form("photo_generation"):
-            if use_camera:
-                uploaded = st.camera_input("Haz una foto")
-            else:
-                uploaded = st.file_uploader(
-                    "Sube una foto (maximo 10 MB)", type=["jpg", "jpeg", "png", "webp"]
-                )
-            extra = st.text_input("Detalles adicionales (opcional)", max_chars=500)
-            photo_frame = st.checkbox("Anadir marco", value=True, key="photo_frame")
-            consent = st.checkbox("Tengo permiso para enviar esta foto al servicio de IA")
-            photo_submit = st.form_submit_button("Crear desde la foto", type="primary")
+        consent = st.checkbox("Tengo permiso para enviar esta foto al servicio de IA")
+        if use_camera:
+            uploaded = st.camera_input("Haz una foto")
+        else:
+            uploaded = st.file_uploader(
+                "Sube una foto (maximo 10 MB)", type=["jpg", "jpeg", "png", "webp"]
+            )
+        st.caption(
+            "Con tu permiso, cada foto nueva se analiza automaticamente. "
+            "Veras la descripcion antes de generar el personaje; no es analisis de video continuo."
+        )
+        photo = uploaded.getvalue() if uploaded is not None and consent else None
+        analysis = analyze_photo(analyzer, generation_lock, photo)
+        extra = st.text_input("Detalles adicionales (opcional)", max_chars=500)
+        photo_frame = st.checkbox("Anadir marco", value=True, key="photo_frame")
+        photo_submit = st.button(
+            "Crear desde la foto", type="primary", disabled=analysis is None or not consent
+        )
         if photo_submit:
-            if uploaded is None or not consent:
-                st.warning("Selecciona una foto y confirma que tienes permiso para usarla.")
+            if analysis is None or not consent:
+                st.warning("Confirma el permiso y analiza la foto antes de generar.")
             else:
-                photo = uploaded.getvalue()
+                description = analysis
+                if extra.strip():
+                    description = f"{description.rstrip('. ')}. {extra.strip()}"
                 add_frame = photo_frame
 
-    if description is not None or photo is not None:
+    if description is not None:
         if time.monotonic() - st.session_state.get("last_attempt", -60) < 30:
             st.warning("Espera 30 segundos entre generaciones.")
         elif not generation_lock.acquire(blocking=False):
@@ -112,10 +153,6 @@ def main():
             st.session_state.last_attempt = time.monotonic()
             try:
                 with st.spinner("Creando tu personaje. Puede tardar uno o dos minutos..."):
-                    if photo is not None:
-                        description = analyzer.analyze_face(photo)
-                        if extra.strip():
-                            description = f"{description}. {extra.strip()}"
                     st.session_state.result = generator.generate_minecraft_image(
                         description, add_frame=add_frame
                     )

@@ -25,17 +25,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 $root = Split-Path $PSScriptRoot -Parent
-
-function Invoke-Azure {
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
-    $result = & az @Arguments --only-show-errors --output json
-    if ($LASTEXITCODE -ne 0) {
-        throw "Azure command failed: $($Arguments[0..1] -join ' ')"
-    }
-    if ($result) {
-        ($result -join "`n") | ConvertFrom-Json
-    }
-}
+. "$PSScriptRoot\azure.ps1"
 
 function Grant-Role {
     param([string]$Scope, [string]$Principal, [string]$Role)
@@ -49,16 +39,9 @@ function Grant-Role {
     }
 }
 
-$account = Invoke-Azure @('account', 'show', '--subscription', $Subscription)
-if ($account.user.type -ne 'user' -or $account.user.name -ine $DeploymentAccount) {
-    throw "Sign in to Azure CLI as $DeploymentAccount in tenant $($account.tenantId) before deploying."
-}
-Invoke-Azure @('account', 'set', '--subscription', $Subscription) | Out-Null
-$signedIn = Invoke-Azure @('ad', 'signed-in-user', 'show')
-if ($signedIn.userPrincipalName -ine $DeploymentAccount) {
-    throw 'The Microsoft Graph session does not match the configured deployment account.'
-}
-$ownerId = $signedIn.id
+$session = Assert-DeploymentAccount -Subscription $Subscription -DeploymentAccount $DeploymentAccount
+$account = $session.Account
+$ownerId = $session.User.id
 $subscriptionArgs = @('--subscription', $Subscription)
 $groupArgs = @('--resource-group', $ResourceGroup) + $subscriptionArgs
 $resourcePrefix = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers"
@@ -184,8 +167,7 @@ $appVariables = @(
     "AZURE_VISION_DEPLOYMENT=$VisionModel",
     "AZURE_STORAGE_ACCOUNT_URL=https://$StorageAccount.blob.core.windows.net",
     "PUBLIC_DOWNLOAD_BASE_URL=$downloadUrl",
-    'REQUIRE_AUTH=true',
-    "ALLOWED_USER_IDS=$ownerId"
+    'REQUIRE_AUTH=true'
 )
 
 if (-not $SkipBuild) {
@@ -200,6 +182,15 @@ if (-not $SkipBuild) {
 }
 
 $apps = @(Invoke-Azure (@('containerapp', 'list') + $groupArgs))
+$allowedUserIds = @($ownerId)
+$existingWeb = @($apps | Where-Object { $_.name -eq $AppName })
+if ($existingWeb.Count -eq 1) {
+    $existingAuth = Get-ContainerAppAuth -ResourceId $existingWeb[0].id
+    if ($null -ne $existingAuth) {
+        $allowedUserIds = @(Get-AccessUserIds -Auth $existingAuth -OwnerId $ownerId)
+    }
+}
+$appVariables += "ALLOWED_USER_IDS=$($allowedUserIds -join ',')"
 if ($DownloadAppName -notin $apps.name) {
     Invoke-Azure (@('containerapp', 'create', '--name', $DownloadAppName,
         '--environment', $environmentResource.id, '--image', $image,
@@ -314,10 +305,8 @@ $auth = @{
             azureActiveDirectory = @{
                 enabled = $true
                 login = @{
-                    loginParameters = @(
-                        "login_hint=$DeploymentAccount",
-                        'prompt=select_account'
-                    )
+                    loginParameters = @(Get-AccountSelectionParameters `
+                        -UserIds $allowedUserIds -DeploymentAccount $DeploymentAccount)
                 }
                 registration = @{
                     clientId = $registration.appId
@@ -331,7 +320,7 @@ $auth = @{
                             $registration.appId,
                             '04b07795-8ddb-461a-bbee-02f9e1bf7b46'
                         )
-                        allowedPrincipals = @{ identities = @($ownerId) }
+                        allowedPrincipals = @{ identities = $allowedUserIds }
                     }
                 }
             }
@@ -340,15 +329,9 @@ $auth = @{
         httpSettings = @{ requireHttps = $true }
     }
 }
-$authFile = Join-Path ([System.IO.Path]::GetTempPath()) "minecraft-auth-$PID.json"
-try {
-    $auth | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $authFile -Encoding utf8
-    Invoke-Azure @('rest', '--method', 'PUT', '--url',
-        "https://management.azure.com$resourcePrefix/Microsoft.App/containerApps/$AppName/authConfigs/current?api-version=2025-01-01",
-        '--body', "@$authFile") | Out-Null
-} finally {
-    Remove-Item -LiteralPath $authFile -ErrorAction SilentlyContinue
-}
+Invoke-AzureJson -Method PUT -Body $auth -Url (
+    "https://management.azure.com$resourcePrefix/Microsoft.App/containerApps/$AppName/authConfigs/current?api-version=2025-01-01"
+) | Out-Null
 Invoke-Azure (@('containerapp', 'ingress', 'enable', '--name', $AppName,
     '--type', 'external', '--target-port', '8501', '--transport', 'http') + $groupArgs) |
     Out-Null
