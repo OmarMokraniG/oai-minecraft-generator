@@ -1,9 +1,8 @@
-streamlit
-pillow
-openai
-qrcode[pil]
-pyperclip
-requests
-python-dotenv
-azure-storage-blob
-azure-ai-inference
+streamlit>=1.55,<2
+pillow>=12,<13
+openai>=2,<3
+qrcode[pil]>=8,<9
+requests>=2.32,<3
+python-dotenv>=1.1,<2
+azure-storage-blob>=12.27,<13
+azure-identity>=1.25,<2

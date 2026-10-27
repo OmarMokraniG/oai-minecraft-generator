@@ -1,5 +1,7 @@
-import qrcode
 import io
+
+import qrcode
+
 
 def generate_qr_code(url):
     """Generate a QR code for the given URL and return bytes."""
@@ -12,13 +14,13 @@ def generate_qr_code(url):
     )
     qr.add_data(url)
     qr.make(fit=True)
-    
+
     # Create an image from the QR code in memory
     img = qr.make_image(fill_color="black", back_color="white")
-    
+
     # Save image to bytes buffer
     img_bytes = io.BytesIO()
-    img.save(img_bytes, format='PNG')
+    img.save(img_bytes, format="PNG")
     img_bytes.seek(0)
-    
+
     return img_bytes

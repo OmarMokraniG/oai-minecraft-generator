@@ -1,70 +1,95 @@
-# ⛏️ Minecraft Character Generator
+# Minecraft Character Studio
 
-A web application that generates Minecraft-style character images based on text descriptions or webcam photos using Azure AI services. The app uses DALL-E 3 for image generation and Mistral for facial analysis, with automatic image storage to Azure Blob Storage and QR code generation for easy sharing.
+A web application that turns a text description or photo into a Minecraft-style
+character, with PNG downloads and expiring QR sharing links.
 
-## 📋 Features
+Based on [drhelius/oai-minecraft-generator](https://github.com/drhelius/oai-minecraft-generator).
+The original MIT license and attribution are preserved in `LICENSE`.
 
-- Generate Minecraft style character images from text descriptions
-- Analyze facial features from webcam photos to generate personalized characters
-- Automatic image storage in Azure Blob Storage
-- QR code generation for easy sharing
-- Simple, user-friendly Streamlit interface
+## Azure deployment
 
-## 🚀 Getting Started
+The deployment uses the existing resource group `rg-minecraftgenerator-001` in
+Sweden Central. It adds a Consumption Azure Container App (0-1 replicas), a Basic
+Azure Container Registry, a managed identity and a Log Analytics workspace.
+The existing Foundry account and storage account are reused without deleting
+their other resources or deployments.
 
-### Prerequisites
+- Image generation: `gpt-image-2.5-sunburst` (`2026-09-08`).
+- Photo analysis: `gpt-6.1-sol` (`2026-09-29`) via the Responses API.
+- Sign-in: single-tenant Microsoft Entra ID, restricted to the deploying user.
+- Service authentication: managed identity and resource-scoped RBAC. No model
+  API keys or storage connection strings are used.
+- Sharing: private blobs with HTTPS-only, read-only user-delegation SAS links
+  that expire after one hour. Anonymous container access remains disabled.
+- Photos: resized, stripped of metadata and sent to the vision model with
+  `store=False`; the application does not persist the original photo.
 
-- Python 3.8+
-- Azure OpenAI account with DALL-E 3 access
-- Azure AI Services account with Mistral model access
-- Azure Storage account
+Install Azure CLI with the Container Apps extension, sign into the intended
+tenant/subscription, and run in PowerShell:
 
-### Installation
-
-1. Clone the repository:
-   ```
-   git clone <repository-url>
-   cd oai-minecraft-generator
-   ```
-
-2. Install required packages:
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. Set up environment variables:
-   - Copy `.env.sample` to `.env`
-   - Fill in your Azure OpenAI, Azure AI, and Azure Storage credentials
-
-### Configuration
-
-Update the `.env` file with your credentials:
-```
-# DALL-E Configuration
-MODEL_DALLE="dall-e-3"
-DEPLOYMENT_NAME_DALLE=dall-e-3
-ENDPOINT_DALLE=your-azure-openai-endpoint
-API_KEY_DALLE=your-api-key
-API_TYPE_DALLE=openai
-API_VERSION_DALLE=2024-10-21
-
-# Mistral Configuration
-MODEL_MISTRAL="Mistral Small"
-DEPLOYMENT_NAME_MISTRAL=your-mistral-deployment
-ENDPOINT_MISTRAL=your-mistral-endpoint
-API_KEY_MISTRAL=your-mistral-api-key
-API_TYPE_MISTRAL=azure
-API_VERSION_MISTRAL=2024-05-01-preview
-
-# Azure Blob Storage Configuration
-AZURE_STORAGE_CONNECTION_STRING=your-azure-storage-connection-string
+```powershell
+.\infra\deploy.ps1
 ```
 
-## 🖥️ Running the Application
+The script prints the application URL and model deployment names, not secrets.
+It can also run the `Foundation` and `Release` phases separately:
 
-Start the Streamlit app:
-```
-streamlit run app.py
+```powershell
+.\infra\deploy.ps1 -Phase Foundation
+.\infra\deploy.ps1 -Phase Release
 ```
 
-Then navigate to the provided URL (typically http://localhost:8501) in your web browser.
+Deployment requires permission to create resources and role assignments in the
+resource group, deploy the selected models, and register an Entra application.
+The model/version parameters must match the live catalog and available quota.
+Regional model capacity and availability are checked during provisioning.
+
+The storage public **network endpoint** is enabled so that signed QR links can
+be opened from phones. This does not enable public blobs: image access still
+requires a valid signature. Original photos are never uploaded.
+
+The Entra login client secret is stored only as a Container Apps secret and
+expires one year after initial deployment. Rotate it in Entra and update the
+`entra-client-secret` Container Apps secret before expiry.
+
+## Testing
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\ruff.exe format --check .
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+`scripts\smoke_test.py` performs real image generation, private blob upload,
+signed/unsigned download checks, vision analysis, and a second generation from
+the analyzed image. It incurs inference charges and should run with the app's
+managed identity and environment variables, for example in a temporary Container
+Apps job using the same image and identity. It logs pass/fail results, not images,
+signed URLs, prompts or photo descriptions.
+
+## Local development (optional)
+
+Azure hosts the application; users do not need Python or local software.
+For development only, copy `.env.sample` to `.env`, set the deployment names and
+endpoints, sign in with `az login`, and run:
+
+```powershell
+.\.venv\Scripts\streamlit.exe run app.py
+```
+
+The local developer identity needs `Cognitive Services OpenAI User` on the model
+resource and `Storage Blob Data Contributor` on the storage account.
+`REQUIRE_AUTH=false` is for local development only. Production requires both
+Container Apps authentication and an `ALLOWED_USER_IDS` allowlist.
+
+## Costs and limitations
+
+The container scales to zero when idle; registry storage and Log Analytics can
+still incur charges. Models are consumption-billed per request. High-quality
+image generation can take one or two minutes. Only one generation runs at a time,
+and per-session cooldown plus the deployed model quota limit request volume.
+The app's in-memory result disappears if the session/container restarts; download
+the PNG or use its sharing link before expiry. Generated blobs remain private in
+the existing storage account until deleted by its administrator.

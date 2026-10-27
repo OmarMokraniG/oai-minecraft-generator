@@ -1,187 +1,152 @@
+import logging
+import os
+import threading
+import time
+
 import streamlit as st
-from dalle_image_generator import DalleImageGenerator
+from azure.core.exceptions import AzureError
+from openai import OpenAIError
+
+from image_generator import ImageGenerator
+from models_config import Settings
 from qr_code_generator import generate_qr_code
-import pyperclip
 from webcam_analyzer import WebcamAnalyzer
 
-st.set_page_config(
-    page_title="Minecraft-style Character Generator",
-    page_icon="⛏️",
-    layout="centered"
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+st.set_page_config(page_title="Minecraft Character Studio", page_icon="⛏️", layout="centered")
+
+
+@st.cache_resource
+def services():
+    settings = Settings.from_env()
+    return ImageGenerator(settings), WebcamAnalyzer(settings), threading.Lock()
+
+
+def require_user():
+    if os.getenv("REQUIRE_AUTH", "true").lower() != "true":
+        return "local"
+    principal = st.context.headers.get("X-Ms-Client-Principal-Id", "")
+    allowed = {
+        value.strip() for value in os.getenv("ALLOWED_USER_IDS", "").split(",") if value.strip()
+    }
+    if not principal or principal not in allowed:
+        st.error("Inicia sesion con una cuenta autorizada para utilizar el generador.")
+        st.stop()
+    return principal
+
 
 def main():
-    st.title("⛏️ Minecraft Character Generator")
-    st.write("Enter a description or use your webcam to generate a Minecraft-style character!")
-    
-    # Initialize the image generator
-    image_generator = DalleImageGenerator()
-    
-    # Initialize the webcam analyzer
-    webcam_analyzer = WebcamAnalyzer()
-    
-    # Store the last used description in session state
-    if 'last_description' not in st.session_state:
-        st.session_state.last_description = ""
-    
-    # Track if we should regenerate the image
-    if 'regenerate' not in st.session_state:
-        st.session_state.regenerate = False
-    
-    # Track webcam image
-    if 'webcam_image' not in st.session_state:
-        st.session_state.webcam_image = None
-    
-    # Track if we're in webcam capture mode
-    if 'webcam_mode' not in st.session_state:
-        st.session_state.webcam_mode = False
-    
-    # Track if generation is in progress
-    if 'generating' not in st.session_state:
-        st.session_state.generating = False
-        
-    # Handle regeneration from previous run
-    if st.session_state.regenerate and st.session_state.last_description:
-        st.session_state.regenerate = False
-        st.session_state.generating = True
-        generate_minecraft_image(st.session_state.last_description, image_generator)
-        st.session_state.generating = False
-    
-    # Process webcam image if it exists in session state
-    if st.session_state.webcam_image is not None:
-        try:
-            # Get image bytes from session state
-            image_bytes = st.session_state.webcam_image.getvalue()
-            
-            # Set generating flag to true
-            st.session_state.generating = True
-            
-            # Create a placeholder for features
-            features_placeholder = st.empty()
-            
-            # Show analyzing spinner
-            with st.spinner("Analyzing facial features..."):
-                # Analyze the image
-                features = webcam_analyzer.analyze_face(image_bytes)
-                
-                # Display features (will be removed later)
-                features_placeholder.success(f"Detected features: {features}")
-                
-                # Use the features as the description
-                st.session_state.last_description = features
-                
-                # Log the features to console as well
-                print(f"Detected features: {features}")
-            
-            # Generate the Minecraft character
-            generate_minecraft_image(features, image_generator)
-            
-            # Clear the features message after generation is complete
-            features_placeholder.empty()
-            
-            # Reset generating flag
-            st.session_state.generating = False
-            
-            # Clear the webcam image from session state
-            st.session_state.webcam_image = None
-            st.session_state.webcam_mode = False
-        except Exception as e:
-            st.error(f"Error analyzing image: {str(e)}")
-            # Clear the webcam image from session state on error
-            st.session_state.webcam_image = None
-            st.session_state.webcam_mode = False
-            st.session_state.generating = False
-    
-    # Show webcam capture if in webcam mode
-    if st.session_state.webcam_mode:
-        webcam_image = st.camera_input("Take a picture")
-        if webcam_image:
-            # Store the webcam image in session state
-            st.session_state.webcam_image = webcam_image
-            st.session_state.webcam_mode = False
-            st.rerun()  # Rerun to process the image
-        
-        # Add cancel button below the webcam
-        if st.button("❌ Cancel", use_container_width=True):
-            st.session_state.webcam_mode = False
-            st.rerun()
-    
-    # Use chat_input instead of form with text_area and button
-    if not st.session_state.generating and not st.session_state.webcam_mode:
-        description = st.chat_input(
-            placeholder="Example: A zombie warrior with diamond armor and enchanted sword",
+    require_user()
+    st.title("⛏️ Minecraft Character Studio")
+    st.write("Convierte una idea o una foto en tu propio personaje de Minecraft.")
+    st.caption(
+        "Las fotos se envian al modelo para analizarlas; no se guardan en Blob Storage. "
+        "Solo se almacena el personaje generado."
+    )
+    try:
+        generator, analyzer, generation_lock = services()
+    except ValueError:
+        logger.exception("Application configuration is invalid")
+        st.error("La aplicacion no esta configurada. Contacta con el administrador.")
+        st.stop()
+
+    with st.expander("Modelos y privacidad"):
+        st.write(f"Imagen: **{generator.settings.image_deployment}**")
+        st.write(f"Vision: **{analyzer.settings.vision_deployment}**")
+        st.write(
+            "Los enlaces de descarga y QR caducan en una hora. Cualquier persona "
+            "que tenga el enlace puede descargar esa imagen durante ese tiempo. "
+            "Usa solo fotos que tengas permiso para enviar."
         )
-        
-        # Process the input when user submits
-        if description:
-            # Copy the description to clipboard
+        if os.getenv("REQUIRE_AUTH", "true").lower() == "true":
+            st.link_button("Cerrar sesion", "/.auth/logout")
+
+    text_tab, photo_tab = st.tabs(["Desde una descripcion", "Desde una foto"])
+    description = None
+    photo = None
+    add_frame = True
+    with text_tab:
+        with st.form("text_generation"):
+            text = st.text_area(
+                "Describe tu personaje",
+                placeholder="Un explorador con armadura de diamante y una espada brillante",
+                max_chars=1000,
+            )
+            text_frame = st.checkbox("Anadir marco", value=True, key="text_frame")
+            text_submit = st.form_submit_button("Generar personaje", type="primary")
+        if text_submit:
+            description = text.strip()
+            add_frame = text_frame
+            if not description:
+                st.warning("Escribe una descripcion antes de generar.")
+                description = None
+
+    with photo_tab:
+        use_camera = st.checkbox("Usar la webcam")
+        with st.form("photo_generation"):
+            if use_camera:
+                uploaded = st.camera_input("Haz una foto")
+            else:
+                uploaded = st.file_uploader(
+                    "Sube una foto (maximo 10 MB)", type=["jpg", "jpeg", "png", "webp"]
+                )
+            extra = st.text_input("Detalles adicionales (opcional)", max_chars=500)
+            photo_frame = st.checkbox("Anadir marco", value=True, key="photo_frame")
+            consent = st.checkbox("Tengo permiso para enviar esta foto al servicio de IA")
+            photo_submit = st.form_submit_button("Crear desde la foto", type="primary")
+        if photo_submit:
+            if uploaded is None or not consent:
+                st.warning("Selecciona una foto y confirma que tienes permiso para usarla.")
+            else:
+                photo = uploaded.getvalue()
+                add_frame = photo_frame
+
+    if description is not None or photo is not None:
+        if time.monotonic() - st.session_state.get("last_attempt", -60) < 30:
+            st.warning("Espera 30 segundos entre generaciones.")
+        elif not generation_lock.acquire(blocking=False):
+            st.warning("Hay otra generacion en curso. Intentalo de nuevo en un momento.")
+        else:
+            st.session_state.last_attempt = time.monotonic()
             try:
-                pyperclip.copy(description)
-            except Exception as e:
-                print(f"Could not copy to clipboard: {str(e)}")
-                
-            # Store the description in session state
-            st.session_state.last_description = description
-            
-            # Set generating flag
-            st.session_state.generating = True
-            
-            # Generate image
-            generate_minecraft_image(description, image_generator)
-            
-            # Reset generating flag
-            st.session_state.generating = False
+                with st.spinner("Creando tu personaje. Puede tardar uno o dos minutos..."):
+                    if photo is not None:
+                        description = analyzer.analyze_face(photo)
+                        if extra.strip():
+                            description = f"{description}. {extra.strip()}"
+                    st.session_state.result = generator.generate_minecraft_image(
+                        description, add_frame=add_frame
+                    )
+                    st.session_state.generated_at = time.time()
+            except (OpenAIError, AzureError, ValueError, OSError):
+                logger.exception("Character generation failed")
+                st.error(
+                    "No se pudo crear el personaje. El servicio puede estar ocupado "
+                    "o haber rechazado el contenido. Prueba otra vez con otra descripcion."
+                )
+            finally:
+                generation_lock.release()
 
-    # Control buttons section
-    st.text(" ")
-    st.text(" ")
-    
-    # Create a row with two buttons
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.session_state.last_description:
-            # Disable button during generation
-            if st.button("🔄 Generate Again with Same Prompt", 
-                       use_container_width=True,
-                       disabled=st.session_state.generating or st.session_state.webcam_mode):
-                # Set flag to regenerate and trigger a rerun
-                st.session_state.regenerate = True
-                st.rerun()
-    
-    with col2:
-        # Disable button during generation
-        if st.button("📷 Generate from Webcam", 
-                   use_container_width=True,
-                   disabled=st.session_state.generating or st.session_state.webcam_mode):
-            # Set webcam mode and trigger rerun
-            st.session_state.webcam_mode = True
-            st.rerun()
+    if "result" in st.session_state:
+        result = st.session_state.result
+        st.image(result["image_bytes"], caption="Tu personaje", width="stretch")
+        st.download_button(
+            "Descargar PNG",
+            result["image_bytes"],
+            file_name=result["filename"],
+            mime="image/png",
+            on_click="ignore",
+        )
+        if time.time() - st.session_state.generated_at < 3500:
+            with st.expander("Compartir con QR"):
+                st.image(generate_qr_code(result["blob_url"]), width=240)
+                st.link_button("Abrir imagen", result["blob_url"])
+                st.caption("El enlace permite descargar esta imagen y caduca en una hora.")
+        else:
+            st.info("El enlace de compartir ha caducado. Puedes descargar el PNG arriba.")
 
-def generate_minecraft_image(description, image_generator):
-    with st.spinner(f"Generating your character..."):
-        try:
-            # Generate the image with frame included
-            result = image_generator.generate_minecraft_image(description)
-            
-            # Create two columns for displaying images side by side
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # Display image directly from bytes without caption
-                st.image(result["image_bytes"], use_container_width=True)
-                st.markdown(f"<div style='text-align: center;'>Generated Character</div>", unsafe_allow_html=True)
-            
-            # Generate QR code for the blob URL
-            qr_bytes = generate_qr_code(result["blob_url"])
-            
-            with col2:
-                # Display QR code directly from bytes without caption
-                st.image(qr_bytes, use_container_width=True)
-                st.markdown(f"<div style='text-align: center;'>Scan QR Code or use this <a href='{result['blob_url']}' target='_blank'>direct link</a></div>", unsafe_allow_html=True)
-            
-        except Exception as e:
-            st.error(f"Error generating image: {str(e)}")
 
 if __name__ == "__main__":
     main()

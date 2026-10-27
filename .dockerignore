@@ -3,6 +3,7 @@
 .gitignore
 README.md
 .env
+.env.*
 __pycache__/
 *.py[cod]
 *$py.class
@@ -10,3 +11,8 @@ __pycache__/
 .coverage
 htmlcov/
 .vscode/
+.venv/
+.ruff_cache/
+tests/
+infra/
+requirements-dev.txt
