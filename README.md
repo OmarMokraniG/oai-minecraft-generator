@@ -31,6 +31,24 @@ per-session cooldown.
 
 ## Manage access for colleagues and friends
 
+[Open the invitation portal](https://ca-minecraftgen-admin.jollyocean-203dead9.swedencentral.azurecontainerapps.io/),
+or use **Invitar compañeros y amigos** in the generator. Only the deployment
+administrator can open it. Enter an email and select **Dar acceso y enviar correo**.
+The portal creates/reuses the Entra account, verifies both application access
+controls, and sends a Spanish email containing the guest acceptance link when
+needed, the application/sign-in links, and photo/generation/download instructions.
+Existing directory users also receive the instructions email.
+
+An Azure Container Apps Job performs each invitation independently of the browser.
+The portal shows progress and the ten most recent executions. Only one invitation
+can run at a time; retries of the same request reuse its execution. A successful
+execution means Azure Communication Services accepted the email for delivery,
+not that the recipient has opened it or that their mailbox has accepted it.
+Check spam/junk if necessary. A failed operation is not reported as success:
+access may already exist, so inspect the job logs before retrying.
+
+### Command-line administration and revocation
+
 Run these commands from the repository in PowerShell, signed into Azure CLI as
 the configured deployment administrator:
 
@@ -74,6 +92,12 @@ endpoint and private DNS.
 The existing Foundry account and storage account are reused without deleting
 their other resources or deployments.
 
+- Invitations: a separate administrator-only Container App, a manual Container
+  Apps Job, Azure Communication Services Email, and an Azure-managed sending
+  domain with engagement tracking disabled. The portal scales to zero and the
+  worker runs only when requested. Email data location is Europe.
+    Email send and delivery-status diagnostics go to the existing Log Analytics
+    workspace; engagement/open tracking remains disabled.
 - Image generation: `gpt-image-2.5-sunburst` (`2026-09-08`).
 - Photo analysis: `gpt-6.1-sol` (`2026-09-29`) via the Responses API.
 - Sign-in: single-tenant Microsoft Entra ID, restricted to the administrator and
@@ -125,8 +149,21 @@ internet or bypassing the subscription's network policy. The gateway disables
 query-string access logs so SAS signatures are not logged.
 
 The Entra login client secret is stored only as a Container Apps secret and
-expires one year after initial deployment. Rotate it in Entra and update the
-`entra-client-secret` Container Apps secret before expiry.
+expires one year after initial deployment. The web and administration portal have
+separate login secrets. Rotate each in Entra and update its `entra-client-secret`
+Container Apps secret before expiry.
+
+`infra\portal.ps1` provisions the email resources/identities in `Foundation` and
+deploys the portal/job in `Release`; `deploy.ps1` invokes both automatically.
+Use `-SkipPortal` only for a generator-only release after the portal is installed.
+Initial provisioning also requires Entra administrator consent for the worker's
+`User.ReadBasic.All` and `User.Invite.All` application permissions. Its custom Azure
+roles are scoped to the generator and communication resource. The portal can
+read/start only its invitation job, not edit the generator directly. Job start
+permission permits overriding the job template and using its identity, so the
+portal remains a trusted administrative component, not an isolation boundary.
+It validates administrator identity, same-origin requests, CSRF, email and request
+fields; it never accepts arbitrary job commands or templates from the browser.
 
 ## Testing
 
@@ -143,6 +180,8 @@ python -m venv .venv
 The PowerShell tests mock Azure CLI and check deployment identity, guest
 invitations, both authorization controls, revocation, failure recovery and
 preservation of access during redeployment. They do not send real invitations.
+Python tests also cover administrator-only invitation access, CSRF, invalid input,
+new/existing users, durable job submission, idempotency, and email failure handling.
 
 `scripts\smoke_test.py` performs real image generation, private blob upload,
 signed/unsigned download checks, vision analysis, and a second generation from
@@ -168,7 +207,7 @@ Container Apps authentication and an `ALLOWED_USER_IDS` allowlist.
 
 ## Costs and limitations
 
-Both containers scale to zero when idle; registry storage, private endpoints,
+All web containers scale to zero when idle; registry storage, private endpoints,
 private DNS, networking and Log Analytics can still incur charges. Models are
 consumption-billed per request. High-quality
 image generation can take one or two minutes. Only one generation runs at a time,
@@ -176,3 +215,9 @@ and per-session cooldown plus the deployed model quota limit request volume.
 The app's in-memory result disappears if the session/container restarts; download
 the PNG or use its sharing link before expiry. Generated blobs remain private in
 the existing storage account until deleted by its administrator.
+
+Invitations incur job execution and email delivery charges. The Azure-managed
+email domain is intended for testing/low volume and has service sending quotas;
+use a verified custom domain and request quota increases before bulk use. The
+portal is not a mailing-list or bulk-invitation service. Never run CLI access
+changes or redeploy the generator concurrently with an invitation job.

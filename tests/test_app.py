@@ -63,6 +63,16 @@ def test_text_generation_and_result_survive_rerun(configured_app):
     generator.generate_minecraft_image.assert_called_once()
 
 
+@pytest.mark.parametrize("administrator", ["local", "another-user"])
+def test_invitation_link_is_only_shown_to_administrator(configured_app, monkeypatch, administrator):
+    at, _, _, _ = configured_app
+    monkeypatch.setenv("ADMIN_USER_ID", administrator)
+    monkeypatch.setenv("ADMIN_PORTAL_URL", "https://portal.example.com")
+    at.run()
+    assert not at.exception
+    assert len(at.get("link_button")) == (1 if administrator == "local" else 0)
+
+
 @pytest.mark.parametrize("camera", [False, True])
 def test_photo_preview_requires_consent_and_is_reused_for_generation(configured_app, camera):
     at, generator, analyzer, photo = configured_app

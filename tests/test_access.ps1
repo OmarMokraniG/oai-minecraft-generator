@@ -163,7 +163,7 @@ if (@($login | Where-Object { $_ -like 'login_hint=*' }).Count) {
 }
 Write-Output 'PASS invitation and repeated Add update both controls without duplicate email'
 
-& "$PSScriptRoot\..\infra\deploy.ps1" -Phase Release -SkipBuild -ImageTag test @options | Out-Null
+& "$PSScriptRoot\..\infra\deploy.ps1" -Phase Release -SkipBuild -SkipPortal -ImageTag test @options | Out-Null
 Assert-Membership $true
 Write-Output 'PASS redeployment preserves invited users in both controls'
 

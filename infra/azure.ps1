@@ -73,3 +73,15 @@ function Get-AccountSelectionParameters {
         "login_hint=$DeploymentAccount"
     }
 }
+
+function Grant-Role {
+    param([string]$Scope, [string]$Principal, [string]$Role)
+    $existing = @(Invoke-Azure @('role', 'assignment', 'list',
+        '--assignee-object-id', $Principal, '--scope', $Scope,
+        '--role', $Role, '--subscription', $Subscription))
+    if ($existing.Count -eq 0) {
+        Invoke-Azure @('role', 'assignment', 'create',
+            '--assignee-object-id', $Principal, '--assignee-principal-type', 'ServicePrincipal',
+            '--scope', $Scope, '--role', $Role, '--subscription', $Subscription) | Out-Null
+    }
+}

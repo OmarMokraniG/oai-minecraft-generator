@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invitaciones - Minecraft Generator</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/portal.js" defer></script>
+</head>
+<body>
+<main>
+  <p class="eyebrow">MINECRAFT GENERATOR / ADMINISTRACION</p>
+  <h1>Invita a tus compa&ntilde;eros y amigos</h1>
+  <p>Introduce su correo. Configuraremos el acceso y enviaremos un mensaje con los enlaces y las instrucciones.</p>
+  <section class="card">
+    <form id="invite-form">
+      <label for="email">Correo de la persona invitada</label>
+      <input id="email" name="email" type="email" maxlength="254" autocomplete="off"
+             placeholder="amigo@dominio.com" required>
+      <button id="submit" type="submit" disabled>Dar acceso y enviar correo</button>
+    </form>
+    <p id="status" role="status">Comprobando la sesi&oacute;n...</p>
+    <p class="muted">Solo tu cuenta de administrador puede usar este portal. Los invitados no reciben permisos sobre Azure ni GitHub.</p>
+  </section>
+  <section class="card">
+    <h2>Invitaciones recientes</h2>
+    <p class="muted">El proceso contin&uacute;a en Azure aunque cierres esta p&aacute;gina. Puede tardar unos minutos.</p>
+    <ul id="history"></ul>
+  </section>
+  <p><a id="generator">Abrir el generador</a> &middot; <a href="/.auth/logout">Cerrar sesi&oacute;n</a></p>
+</main>
+</body>
+</html>

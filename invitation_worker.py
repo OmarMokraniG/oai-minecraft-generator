@@ -1,0 +1,71 @@
+import json
+import logging
+import os
+import sys
+from uuid import UUID
+
+import requests
+from azure.communication.email import EmailClient
+from azure.core.exceptions import AzureError
+from azure.identity import DefaultAzureCredential
+
+from invitation_service import (
+    AccessManager,
+    AzureApi,
+    https_url,
+    invitation_message,
+    normalize_email,
+)
+
+
+def run():
+    logging.basicConfig(level=logging.WARNING)
+    stage = "configuration"
+    try:
+        recipient = normalize_email(os.environ["INVITED_EMAIL"])
+        operation = str(UUID(os.environ["INVITATION_OPERATION_ID"]))
+        app_url = https_url(os.environ["GENERATOR_URL"])
+        credential = DefaultAzureCredential(exclude_interactive_browser_credential=True)
+        stage = "authorization"
+        manager = AccessManager(
+            AzureApi(credential),
+            os.environ["GENERATOR_RESOURCE_ID"],
+            os.environ["ADMIN_USER_ID"],
+            app_url,
+        )
+        redeem_url = manager.grant(recipient)
+        stage = "email"
+        with EmailClient(https_url(os.environ["EMAIL_ENDPOINT"]), credential) as client:
+            result = client.begin_send(
+                invitation_message(recipient, app_url, os.environ["EMAIL_SENDER"], redeem_url),
+                operation_id=operation,
+            ).result(timeout=180)
+        if not result or result.get("status") != "Succeeded":
+            raise RuntimeError("The email service did not confirm sending")
+        print(json.dumps({"status": "email_sent", "operationId": operation}), flush=True)
+        return 0
+    except (
+        AzureError,
+        requests.RequestException,
+        ValueError,
+        RuntimeError,
+        TimeoutError,
+        KeyError,
+    ) as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "stage": stage,
+                    "errorType": type(exc).__name__,
+                    "httpStatus": getattr(exc, "status_code", None)
+                    or getattr(getattr(exc, "response", None), "status_code", None),
+                }
+            ),
+            flush=True,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(run())

@@ -71,13 +71,15 @@ def analyze_photo(analyzer, generation_lock, photo):
 
 
 def main():
-    require_user()
+    principal = require_user()
     st.title("⛏️ Minecraft Character Studio")
     st.write("Convierte una idea o una foto en tu propio personaje de Minecraft.")
     st.caption(
         "Las fotos se envian al modelo para analizarlas; no se guardan en Blob Storage. "
         "Solo se almacena el personaje generado."
     )
+    if principal == os.getenv("ADMIN_USER_ID") and os.getenv("ADMIN_PORTAL_URL"):
+        st.link_button("Invitar compañeros y amigos", os.environ["ADMIN_PORTAL_URL"])
     try:
         generator, analyzer, generation_lock = services()
     except ValueError:

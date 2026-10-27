@@ -19,25 +19,14 @@ param(
     [string]$VisionModel = 'gpt-6.1-sol',
     [string]$VisionVersion = '2026-09-29',
     [string]$ImageTag = (Get-Date -Format 'yyyyMMddHHmmss'),
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipPortal
 )
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 $root = Split-Path $PSScriptRoot -Parent
 . "$PSScriptRoot\azure.ps1"
-
-function Grant-Role {
-    param([string]$Scope, [string]$Principal, [string]$Role)
-    $existing = @(Invoke-Azure @('role', 'assignment', 'list',
-        '--assignee-object-id', $Principal, '--scope', $Scope,
-        '--role', $Role, '--subscription', $Subscription))
-    if ($existing.Count -eq 0) {
-        Invoke-Azure @('role', 'assignment', 'create',
-            '--assignee-object-id', $Principal, '--assignee-principal-type', 'ServicePrincipal',
-            '--scope', $Scope, '--role', $Role, '--subscription', $Subscription) | Out-Null
-    }
-}
 
 $session = Assert-DeploymentAccount -Subscription $Subscription -DeploymentAccount $DeploymentAccount
 $account = $session.Account
@@ -145,6 +134,11 @@ if ($Phase -in @('Foundation', 'All')) {
             '--environment-mode', 'WorkloadProfiles') + $groupArgs) | Out-Null
         $workspaceKeys = $null
     }
+    if (-not $SkipPortal) {
+        & "$PSScriptRoot\portal.ps1" -Phase Foundation -Subscription $Subscription `
+            -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
+            -Location $Location -Registry $Registry -Environment $Environment -AppName $AppName
+    }
 }
 
 if ($Phase -eq 'Foundation') {
@@ -160,6 +154,7 @@ $environmentResource = Invoke-Azure (@('containerapp', 'env', 'show',
 $image = "$Registry.azurecr.io/minecraft-generator:$ImageTag"
 $url = "https://$AppName.$($environmentResource.properties.defaultDomain)"
 $downloadUrl = "https://$DownloadAppName.$($environmentResource.properties.defaultDomain)"
+$portalUrl = "https://ca-minecraftgen-admin.$($environmentResource.properties.defaultDomain)"
 $appVariables = @(
     "AZURE_CLIENT_ID=$($managedIdentity.clientId)",
     "AZURE_OPENAI_ENDPOINT=https://$FoundryAccount.openai.azure.com",
@@ -169,6 +164,9 @@ $appVariables = @(
     "PUBLIC_DOWNLOAD_BASE_URL=$downloadUrl",
     'REQUIRE_AUTH=true'
 )
+if (-not $SkipPortal) {
+    $appVariables += @("ADMIN_USER_ID=$ownerId", "ADMIN_PORTAL_URL=$portalUrl")
+}
 
 if (-not $SkipBuild) {
     Push-Location $root
@@ -233,8 +231,13 @@ if ($registrations.Count -eq 0) {
         '--enable-id-token-issuance', 'true')
 } else {
     $registration = $registrations[0]
-    Invoke-Azure @('ad', 'app', 'update', '--id', $registration.id,
-        '--web-redirect-uris', "$url/.auth/login/aad/callback") | Out-Null
+    $redirects = @($registration.web.redirectUris) + @("$url/.auth/login/aad/callback")
+    if (-not $SkipPortal) {
+        $redirects += "$portalUrl/.auth/login/aad/callback"
+    }
+    $redirects = @($redirects | Where-Object { $_ } | Sort-Object -Unique)
+    Invoke-Azure (@('ad', 'app', 'update', '--id', $registration.id,
+        '--web-redirect-uris') + $redirects) | Out-Null
 }
 $principals = @(Invoke-Azure @('ad', 'sp', 'list',
     '--filter', "appId eq '$($registration.appId)'"))
@@ -335,6 +338,12 @@ Invoke-AzureJson -Method PUT -Body $auth -Url (
 Invoke-Azure (@('containerapp', 'ingress', 'enable', '--name', $AppName,
     '--type', 'external', '--target-port', '8501', '--transport', 'http') + $groupArgs) |
     Out-Null
+if (-not $SkipPortal) {
+    & "$PSScriptRoot\portal.ps1" -Phase Release -Subscription $Subscription `
+        -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
+        -Location $Location -Registry $Registry -Environment $Environment `
+        -AppName $AppName -ImageTag $ImageTag
+}
 
 [ordered]@{
     url = $url
