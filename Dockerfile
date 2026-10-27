@@ -1,9 +1,17 @@
+FROM node:24-slim AS portal-tested
+
+WORKDIR /source
+COPY portal/portal.js portal/portal.js
+COPY tests/test_portal_client.cjs tests/test_portal_client.cjs
+RUN node --test tests/test_portal_client.cjs
+
 FROM python:3.12-slim AS tested
 
 WORKDIR /source
 COPY requirements.txt requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY . .
+COPY --from=portal-tested /source/portal/portal.js portal/portal.js
 RUN ruff check . && ruff format --check . && pytest -q
 
 FROM python:3.12-slim

@@ -2,6 +2,8 @@ const form = document.getElementById("invite-form");
 const button = document.getElementById("submit");
 const status = document.getElementById("status");
 const history = document.getElementById("history");
+const relogin = document.getElementById("relogin");
+const loginUrl = "/.auth/login/aad?post_login_redirect_uri=%2F";
 let csrf;
 let pendingRequest;
 let timer;
@@ -21,13 +23,49 @@ function show(message, error = false) {
   status.dataset.error = String(error);
 }
 
+function recoverAuthentication(error) {
+  if (error.status !== 401 && error.status !== 403) return false;
+  clearTimeout(timer);
+  button.disabled = true;
+  relogin.hidden = false;
+  show(error.message, true);
+  if (error.status === 401) {
+    const lastAttempt = Number(sessionStorage.getItem("portal-login-attempt") || 0);
+    if (Date.now() - lastAttempt > 60000) {
+      sessionStorage.setItem("portal-login-attempt", String(Date.now()));
+      window.location.assign(loginUrl);
+    }
+  }
+  return true;
+}
+
 async function api(url, options = {}) {
-  const response = await fetch(url, { credentials: "same-origin", ...options });
-  const body = await response.json();
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    redirect: "manual",
+    ...options,
+    headers: { Accept: "application/json", ...options.headers }
+  });
+  if (response.status === 401 || response.type === "opaqueredirect") {
+    throw Object.assign(new Error("Tu sesion ha caducado. Inicia sesion de nuevo con la cuenta administradora."), { status: 401 });
+  }
+  const text = await response.text();
+  let body;
+  if (text.trim()) {
+    try {
+      body = JSON.parse(text);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
   if (!response.ok) {
-    const error = new Error(body.error || "No se pudo completar la solicitud.");
-    error.status = response.status;
-    throw error;
+    const message = typeof body?.error === "string" ? body.error
+      : response.status === 403 ? "No tienes acceso o la sesion necesita renovarse. Inicia sesion con la cuenta administradora."
+        : `Azure no pudo completar la solicitud (HTTP ${response.status}). No se ha confirmado la operacion.`;
+    throw Object.assign(new Error(message), { status: response.status });
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw Object.assign(new Error(`El portal devolvio una respuesta incompleta (HTTP ${response.status}). Recarga la pagina.`), { status: response.status });
   }
   return body;
 }
@@ -57,6 +95,10 @@ async function refresh() {
     button.disabled = true;
     show(active ? `${active.email}: ${labels[active.status] || active.status}` : "Esperando el estado de Azure...");
     timer = setTimeout(poll, 3000);
+  } else if (pendingRequest) {
+    button.disabled = false;
+    show(`No se ha confirmado la invitacion a ${pendingRequest.email}. Reintenta el envio; se reutilizara la misma solicitud para evitar duplicados.`, true);
+    timer = setTimeout(poll, 5000);
   } else {
     button.disabled = false;
     const latest = result.invitations[0];
@@ -69,6 +111,7 @@ async function poll() {
   try {
     await refresh();
   } catch (error) {
+    if (recoverAuthentication(error)) return;
     show(`${error.message} Se volvera a consultar el estado automaticamente.`, true);
     timer = setTimeout(poll, 5000);
   }
@@ -94,9 +137,10 @@ form.addEventListener("submit", async event => {
     pendingRequest = null;
     await refresh();
   } catch (error) {
+    if (recoverAuthentication(error)) return;
     show(error.message, true);
-    button.disabled = error.status === 403;
-    if (error.status !== 403) timer = setTimeout(poll, 5000);
+    button.disabled = false;
+    timer = setTimeout(poll, 5000);
   }
 });
 
@@ -107,6 +151,7 @@ form.addEventListener("submit", async event => {
     document.getElementById("generator").href = session.generatorUrl;
     await poll();
   } catch (error) {
+    if (recoverAuthentication(error)) return;
     show(error.message, true);
   }
 })();

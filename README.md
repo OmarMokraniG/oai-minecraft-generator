@@ -38,6 +38,10 @@ The portal creates/reuses the Entra account, verifies both application access
 controls, and sends a Spanish email containing the guest acceptance link when
 needed, the application/sign-in links, and photo/generation/download instructions.
 Existing directory users also receive the instructions email.
+If the Azure sign-in session expires, the portal renews sign-in instead of trying
+to parse an empty authentication response as JSON. If renewal fails, use
+**Iniciar sesion de nuevo**. Gateway errors show their HTTP status; an unconfirmed
+submission is never reported as an older invitation's success.
 Use an address with a working mailbox: an Entra sign-in name does not necessarily
 receive email. Delivery failures such as a nonexistent recipient domain are
 recorded in the email delivery diagnostics, even after the send was accepted.
@@ -176,6 +180,7 @@ python -m venv .venv
 .\.venv\Scripts\ruff.exe check .
 .\.venv\Scripts\ruff.exe format --check .
 .\.venv\Scripts\python.exe -m pytest -q
+node --test .\tests\test_portal_client.cjs
 .\tests\test_deploy.ps1
 .\tests\test_access.ps1
 ```
@@ -183,6 +188,9 @@ python -m venv .venv
 The PowerShell tests mock Azure CLI and check deployment identity, guest
 invitations, both authorization controls, revocation, failure recovery and
 preservation of access during redeployment. They do not send real invitations.
+The Node.js client regression tests cover empty authentication/gateway responses,
+safe sign-in recovery and unconfirmed submissions. The image build runs them in
+a separate Node.js 24 stage; Node.js is not included in the runtime image.
 Python tests also cover administrator-only invitation access, CSRF, invalid input,
 new/existing users, durable job submission, idempotency, and email failure handling.
 
