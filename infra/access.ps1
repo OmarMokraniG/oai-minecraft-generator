@@ -4,9 +4,9 @@ param(
     [string]$Action = 'List',
     [string]$Email,
     [string]$UserId,
-    [string]$Subscription = 'ae027918-9050-4f80-ae04-199387d603ad',
-    [string]$DeploymentAccount = 'admin@MngEnvMCAP274168.onmicrosoft.com',
-    [string]$ResourceGroup = 'rg-minecraftgenerator-001',
+    [Parameter(Mandatory)][string]$Subscription,
+    [string]$DeploymentAccount,
+    [Parameter(Mandatory)][string]$ResourceGroup,
     [string]$AppName = 'ca-minecraftgen-web'
 )
 
@@ -31,6 +31,7 @@ if ($UserId) {
 
 $session = Assert-DeploymentAccount -Subscription $Subscription -DeploymentAccount $DeploymentAccount
 $ownerId = $session.User.id
+$DeploymentAccount = $session.DeploymentAccount
 $groupArgs = @('--resource-group', $ResourceGroup, '--subscription', $Subscription)
 $app = Invoke-Azure (@('containerapp', 'show', '--name', $AppName) + $groupArgs)
 $auth = Get-ContainerAppAuth -ResourceId $app.id

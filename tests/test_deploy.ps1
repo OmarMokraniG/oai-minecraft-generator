@@ -1,5 +1,14 @@
 $ErrorActionPreference = 'Stop'
 $deploymentAccount = 'test-admin@example.invalid'
+$deployment = @{
+    Subscription = 'test-subscription'
+    ResourceGroup = 'test-resource-group'
+    FoundryAccount = 'test-foundry'
+    StorageAccount = 'teststorage'
+    Registry = 'testregistry'
+    CommunicationName = 'test-communication'
+    EmailName = 'test-email'
+}
 $state = @{ Calls = [System.Collections.Generic.List[string]]::new() }
 
 function az {
@@ -31,19 +40,26 @@ $cases = @(
         Name = 'Rejects another Azure CLI user'
         CliUser = 'other@example.invalid'; CliType = 'user'
         GraphUser = $deploymentAccount
-        Expected = 'Sign in to Azure CLI as '; Calls = 1
+        Expected = 'The signed-in Azure CLI user does not match'; Calls = 1
     },
     @{
         Name = 'Rejects a service principal as the deployment account'
         CliUser = $deploymentAccount; CliType = 'servicePrincipal'
         GraphUser = $deploymentAccount
-        Expected = 'Sign in to Azure CLI as '; Calls = 1
+        Expected = 'Sign in to Azure CLI as a Microsoft Entra user'; Calls = 1
     },
     @{
         Name = 'Rejects a mismatched Microsoft Graph session'
         CliUser = $deploymentAccount; CliType = 'user'
         GraphUser = 'other@example.invalid'
         Expected = 'The Microsoft Graph session does not match'; Calls = 3
+    },
+    @{
+        Name = 'Accepts the signed-in user without a hard-coded account'
+        CliUser = 'current@example.invalid'; CliType = 'user'
+        GraphUser = 'current@example.invalid'
+        Expected = 'Identity validation passed; stop before provisioning.'; Calls = 4
+        UseAccountOverride = $false
     },
     @{
         Name = 'Accepts the configured user case-insensitively'
@@ -58,9 +74,14 @@ foreach ($case in $cases) {
     $state.CliUser = $case.CliUser
     $state.CliType = $case.CliType
     $state.GraphUser = $case.GraphUser
+    $parameters = @{} + $deployment
+    $parameters.Phase = 'Release'
+    $parameters.SkipBuild = $true
+    if ($case.UseAccountOverride -ne $false) {
+        $parameters.DeploymentAccount = $deploymentAccount
+    }
     try {
-        & "$PSScriptRoot\..\infra\deploy.ps1" -Phase Release -SkipBuild `
-            -DeploymentAccount $deploymentAccount
+        & "$PSScriptRoot\..\infra\deploy.ps1" @parameters
         throw 'Deployment unexpectedly completed.'
     } catch {
         if (-not $_.Exception.Message.StartsWith($case.Expected)) {

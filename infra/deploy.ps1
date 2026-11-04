@@ -2,18 +2,20 @@
 param(
     [ValidateSet('Foundation', 'Release', 'All')]
     [string]$Phase = 'All',
-    [string]$Subscription = 'ae027918-9050-4f80-ae04-199387d603ad',
-    [string]$DeploymentAccount = 'admin@MngEnvMCAP274168.onmicrosoft.com',
-    [string]$ResourceGroup = 'rg-minecraftgenerator-001',
+    [Parameter(Mandatory)][string]$Subscription,
+    [string]$DeploymentAccount,
+    [Parameter(Mandatory)][string]$ResourceGroup,
     [string]$Location = 'swedencentral',
-    [string]$FoundryAccount = 'f-minecraft-001',
-    [string]$StorageAccount = 'staminecraftgen',
-    [string]$Registry = 'crminecraftgenom4',
-    [string]$Environment = 'env-minecraftgen-private-001',
+    [Parameter(Mandatory)][string]$FoundryAccount,
+    [Parameter(Mandatory)][string]$StorageAccount,
+    [Parameter(Mandatory)][string]$Registry,
+    [string]$Environment = 'env-minecraftgen',
     [string]$Identity = 'id-minecraftgen-001',
     [string]$DownloadIdentity = 'id-minecraftgen-download-001',
     [string]$AppName = 'ca-minecraftgen-web',
     [string]$DownloadAppName = 'ca-minecraftgen-download',
+    [string]$CommunicationName,
+    [string]$EmailName,
     [string]$ImageModel = 'gpt-image-2.5-sunburst',
     [string]$ImageVersion = '2026-09-08',
     [string]$VisionModel = 'gpt-6.1-sol',
@@ -31,11 +33,45 @@ $root = Split-Path $PSScriptRoot -Parent
 $session = Assert-DeploymentAccount -Subscription $Subscription -DeploymentAccount $DeploymentAccount
 $account = $session.Account
 $ownerId = $session.User.id
+$DeploymentAccount = $session.DeploymentAccount
 $subscriptionArgs = @('--subscription', $Subscription)
 $groupArgs = @('--resource-group', $ResourceGroup) + $subscriptionArgs
 $resourcePrefix = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers"
 
+if (-not $SkipPortal -and (-not $CommunicationName -or -not $EmailName)) {
+    throw 'Set globally unique CommunicationName and EmailName values, or use -SkipPortal.'
+}
+
 if ($Phase -in @('Foundation', 'All')) {
+    foreach ($provider in @(
+        'Microsoft.App', 'Microsoft.CognitiveServices', 'Microsoft.ContainerRegistry',
+        'Microsoft.Insights', 'Microsoft.ManagedIdentity', 'Microsoft.Network',
+        'Microsoft.OperationalInsights', 'Microsoft.Storage'
+    )) {
+        $registration = Invoke-Azure (@('provider', 'show', '--namespace', $provider) +
+            $subscriptionArgs)
+        if ($registration.registrationState -ne 'Registered') {
+            Invoke-Azure (@('provider', 'register', '--namespace', $provider,
+                '--wait') + $subscriptionArgs) | Out-Null
+        }
+    }
+    Invoke-Azure (@('group', 'create', '--name', $ResourceGroup,
+        '--location', $Location) + $subscriptionArgs) | Out-Null
+    $accounts = @(Invoke-Azure (@('cognitiveservices', 'account', 'list') + $groupArgs))
+    if ($FoundryAccount -notin $accounts.name) {
+        Invoke-Azure (@('cognitiveservices', 'account', 'create',
+            '--name', $FoundryAccount, '--resource-group', $ResourceGroup,
+            '--location', $Location, '--kind', 'OpenAI', '--sku', 'S0',
+            '--custom-domain', $FoundryAccount) + $subscriptionArgs) | Out-Null
+    }
+    $storageAccounts = @(Invoke-Azure (@('storage', 'account', 'list') + $groupArgs))
+    if ($StorageAccount -notin $storageAccounts.name) {
+        Invoke-Azure (@('storage', 'account', 'create',
+            '--name', $StorageAccount, '--resource-group', $ResourceGroup,
+            '--location', $Location, '--sku', 'Standard_LRS', '--kind', 'StorageV2',
+            '--https-only', 'true', '--allow-blob-public-access', 'false',
+            '--public-network-access', 'Disabled') + $subscriptionArgs) | Out-Null
+    }
     foreach ($model in @(
         @{ Name = $ImageModel; Version = $ImageVersion; Capacity = '1' },
         @{ Name = $VisionModel; Version = $VisionVersion; Capacity = '10' }
@@ -137,7 +173,8 @@ if ($Phase -in @('Foundation', 'All')) {
     if (-not $SkipPortal) {
         & "$PSScriptRoot\portal.ps1" -Phase Foundation -Subscription $Subscription `
             -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
-            -Location $Location -Registry $Registry -Environment $Environment -AppName $AppName
+            -Location $Location -Registry $Registry -Environment $Environment -AppName $AppName `
+            -CommunicationName $CommunicationName -EmailName $EmailName
     }
 }
 
@@ -342,7 +379,8 @@ if (-not $SkipPortal) {
     & "$PSScriptRoot\portal.ps1" -Phase Release -Subscription $Subscription `
         -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
         -Location $Location -Registry $Registry -Environment $Environment `
-        -AppName $AppName -ImageTag $ImageTag
+        -AppName $AppName -ImageTag $ImageTag `
+        -CommunicationName $CommunicationName -EmailName $EmailName
 }
 
 [ordered]@{

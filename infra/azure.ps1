@@ -25,15 +25,22 @@ function Invoke-AzureJson {
 function Assert-DeploymentAccount {
     param([string]$Subscription, [string]$DeploymentAccount)
     $account = Invoke-Azure @('account', 'show', '--subscription', $Subscription)
-    if ($account.user.type -ne 'user' -or $account.user.name -ine $DeploymentAccount) {
-        throw "Sign in to Azure CLI as $DeploymentAccount in tenant $($account.tenantId) before deploying."
+    if ($account.user.type -ne 'user' -or -not $account.user.name) {
+        throw 'Sign in to Azure CLI as a Microsoft Entra user before deploying.'
+    }
+    if ($DeploymentAccount -and $account.user.name -ine $DeploymentAccount) {
+        throw "The signed-in Azure CLI user does not match $DeploymentAccount."
     }
     Invoke-Azure @('account', 'set', '--subscription', $Subscription) | Out-Null
     $user = Invoke-Azure @('ad', 'signed-in-user', 'show')
-    if ($user.userPrincipalName -ine $DeploymentAccount) {
-        throw 'The Microsoft Graph session does not match the configured deployment account.'
+    if ($user.userPrincipalName -ine $account.user.name) {
+        throw 'The Microsoft Graph session does not match the signed-in Azure CLI user.'
     }
-    [pscustomobject]@{ Account = $account; User = $user }
+    [pscustomobject]@{
+        Account = $account
+        User = $user
+        DeploymentAccount = $user.userPrincipalName
+    }
 }
 
 function Get-ContainerAppAuth {

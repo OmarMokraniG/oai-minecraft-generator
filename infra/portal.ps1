@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Foundation', 'Release')][string]$Phase,
-    [string]$Subscription = 'ae027918-9050-4f80-ae04-199387d603ad',
-    [string]$DeploymentAccount = 'admin@MngEnvMCAP274168.onmicrosoft.com',
-    [string]$ResourceGroup = 'rg-minecraftgenerator-001',
+    [Parameter(Mandatory)][string]$Subscription,
+    [string]$DeploymentAccount,
+    [Parameter(Mandatory)][string]$ResourceGroup,
     [string]$Location = 'swedencentral',
-    [string]$Registry = 'crminecraftgenom4',
-    [string]$Environment = 'env-minecraftgen-private-001',
+    [Parameter(Mandatory)][string]$Registry,
+    [Parameter(Mandatory)][string]$Environment,
     [string]$AppName = 'ca-minecraftgen-web',
+    [Parameter(Mandatory)][string]$CommunicationName,
+    [Parameter(Mandatory)][string]$EmailName,
     [string]$ImageTag
 )
 $ErrorActionPreference = 'Stop'
@@ -15,13 +17,14 @@ $PSNativeCommandArgumentPassing = 'Standard'
 . "$PSScriptRoot\azure.ps1"
 $session = Assert-DeploymentAccount -Subscription $Subscription -DeploymentAccount $DeploymentAccount
 $ownerId = $session.User.id
+$DeploymentAccount = $session.DeploymentAccount
 $groupArgs = @('--resource-group', $ResourceGroup, '--subscription', $Subscription)
 $groupId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup"
 $prefix = "$groupId/providers"
 $portalName = 'ca-minecraftgen-admin'
 $jobName = 'job-minecraftgen-invite'
-$communicationName = 'acs-minecraftgen-om4'
-$emailName = 'email-minecraftgen-001'
+$communicationName = $CommunicationName
+$emailName = $EmailName
 $communicationId = "$prefix/Microsoft.Communication/communicationServices/$communicationName"
 $emailId = "$prefix/Microsoft.Communication/emailServices/$emailName"
 $domainId = "$emailId/domains/AzureManagedDomain"

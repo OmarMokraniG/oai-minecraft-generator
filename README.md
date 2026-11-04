@@ -6,18 +6,16 @@ character, with PNG downloads and expiring QR sharing links.
 Based on [drhelius/oai-minecraft-generator](https://github.com/drhelius/oai-minecraft-generator).
 The original MIT license and attribution are preserved in `LICENSE`.
 
-## Open the application
+## Run the application
 
-[Minecraft Character Studio](https://ca-minecraftgen-web.jollyocean-203dead9.swedencentral.azurecontainerapps.io/)
+Deploy the application to your own Azure subscription by following the
+[deployment instructions](#azure-deployment). The deployment prints the URLs
+for your generator, download gateway and (unless disabled) invitation portal.
+No URL or account from a maintainer's Azure environment is required.
 
-Sign in with the Microsoft account authorized for this deployment. The interface
-supports descriptions, webcam capture and uploaded photos. No local installation
-is needed. Browser camera access requires permission and HTTPS.
-
-If your browser has another Microsoft account signed in, use
-[Choose the deployment account](https://ca-minecraftgen-web.jollyocean-203dead9.swedencentral.azurecontainerapps.io/.auth/login/aad?post_login_redirect_uri=%2F).
-The sign-in flow explicitly offers account selection; only authorized users can
-proceed.
+The hosted interface supports descriptions, webcam capture and uploaded photos.
+Browser camera access requires permission and HTTPS. Only users authorized by
+the deployment administrator can sign in.
 
 ### Photo analysis preview
 
@@ -31,8 +29,8 @@ per-session cooldown.
 
 ## Manage access for colleagues and friends
 
-[Open the invitation portal](https://ca-minecraftgen-admin.jollyocean-203dead9.swedencentral.azurecontainerapps.io/),
-or use **Invitar compañeros y amigos** in the generator. Only the deployment
+Open the invitation portal URL printed by the deployment, or use
+**Invitar compañeros y amigos** in the generator. Only the deployment
 administrator can open it. Enter an email and select **Dar acceso y enviar correo**.
 The portal creates/reuses the Entra account, verifies both application access
 controls, and sends a Spanish email containing the guest acceptance link when
@@ -66,12 +64,13 @@ permissions may have been partially updated, so inspect the job logs before retr
 ### Command-line administration and revocation
 
 Run these commands from the repository in PowerShell, signed into Azure CLI as
-the configured deployment administrator:
+the administrator who deployed this instance. Set `$subscription` and
+`$resourceGroup` to the values used for deployment:
 
 ```powershell
-.\infra\access.ps1 -Action List
-.\infra\access.ps1 -Action Add -Email friend@example.com
-.\infra\access.ps1 -Action Remove -Email friend@example.com
+.\infra\access.ps1 -Action List -Subscription $subscription -ResourceGroup $resourceGroup
+.\infra\access.ps1 -Action Add -Email friend@example.com -Subscription $subscription -ResourceGroup $resourceGroup
+.\infra\access.ps1 -Action Remove -Email friend@example.com -Subscription $subscription -ResourceGroup $resourceGroup
 ```
 
 `Add` reuses an existing directory account or sends a Microsoft Entra B2B guest
@@ -83,7 +82,7 @@ is granted. Repeating `Add` does not reinvite an existing matching user.
 Preview an operation without inviting anyone or changing access:
 
 ```powershell
-.\infra\access.ps1 -Action Add -Email friend@example.com -WhatIf
+.\infra\access.ps1 -Action Add -Email friend@example.com -Subscription $subscription -ResourceGroup $resourceGroup -WhatIf
 ```
 
 `Remove` revokes application access without deleting the directory account, and
@@ -100,20 +99,20 @@ propagate, and changing the allowlist can restart browser sessions.
 
 ## Azure deployment
 
-The deployment uses the existing resource group `rg-minecraftgenerator-001` in
-Sweden Central. It adds Consumption Azure Container Apps for the web interface
-and signed downloads (each 0-1 replicas), a Basic Azure Container Registry,
-managed identities, a Log Analytics workspace, and a VNet with a Storage private
-endpoint and private DNS.
-The existing Foundry account and storage account are reused without deleting
-their other resources or deployments.
+The deployment script creates the resource group, Azure OpenAI account, private
+StorageV2 account, Container Apps environment, registry, managed identities,
+Log Analytics workspace and private networking in the subscription you select.
+It deploys the configured models to the new or existing Azure OpenAI account.
+The storage account is configured to deny public and anonymous access. Existing
+resources with the names you provide are reused; do not point it at storage used
+by another workload because the deployment disables its public network access.
 
 - Invitations: a separate administrator-only Container App, a manual Container
   Apps Job, Azure Communication Services Email, and an Azure-managed sending
   domain with engagement tracking disabled. The portal scales to zero and the
   worker runs only when requested. Email data location is Europe.
-    Email send and delivery-status diagnostics go to the existing Log Analytics
-    workspace; engagement/open tracking remains disabled.
+  Email send and delivery-status diagnostics go to the deployment's Log Analytics
+  workspace; engagement/open tracking remains disabled.
 - Image generation: `gpt-image-2.5-sunburst` (`2026-09-08`).
 - Photo analysis: `gpt-6.1-sol` (`2026-09-29`) via the Responses API.
 - Sign-in: single-tenant Microsoft Entra ID, restricted to the administrator and
@@ -127,18 +126,38 @@ their other resources or deployments.
 - Photos: resized, stripped of metadata and sent to the vision model with
   `store=False`; the application does not persist the original photo.
 
-Install Azure CLI with the Container Apps extension, sign into the intended
-tenant/subscription, and run in PowerShell:
+Install Azure CLI with the Container Apps extension, sign in to the tenant that
+owns your subscription, and ensure the selected subscription has quota and access
+to the configured model versions. The script creates the resource group and
+resources on the first run, then reuses them on later runs. Use a fresh suffix
+for globally unique Azure resource names; if Azure reports a name is taken,
+choose another suffix and rerun with the same values:
 
 ```powershell
-.\infra\deploy.ps1
+az login
+$subscription = "<your-subscription-id>"
+$suffix = (Get-Random -Minimum 100000 -Maximum 999999).ToString()
+$deployment = @{
+    Subscription = $subscription
+    ResourceGroup = "rg-minecraft-generator"
+    Location = "swedencentral"
+    FoundryAccount = "mcgen-foundry-$suffix"
+    StorageAccount = "mcgen$suffix"
+    Registry = "mcgenacr$suffix"
+    CommunicationName = "mcgencomm$suffix"
+    EmailName = "mcgenemail$suffix"
+}
+$resourceGroup = $deployment.ResourceGroup
+.\infra\deploy.ps1 @deployment
 ```
 
-The script's `DeploymentAccount` parameter defaults to this deployment's Azure
-administrator. It verifies both the Azure CLI and Microsoft Graph user before
-provisioning, selects the target subscription, and refuses to deploy under a
-different account. Runtime service access still uses managed identities, not the
-administrator's credentials.
+The script uses the signed-in Azure CLI user by default, verifies the Microsoft
+Graph identity matches, and selects the required subscription. Use
+`-DeploymentAccount <user-principal-name>` to require a specific user. Runtime
+service access uses managed identities, not the administrator's credentials.
+The deploying user needs permission to create resources, assign Azure roles and
+register Entra applications; the invitation portal also needs Entra administrator
+consent for its documented Microsoft Graph application permissions.
 
 The script prints the application URL and model deployment names, not secrets.
 The cloud image build runs lint, formatting checks and all unit/UI tests on
@@ -146,17 +165,19 @@ Python 3.12 before producing the runtime image. A failing check prevents release
 It can also run the `Foundation` and `Release` phases separately:
 
 ```powershell
-.\infra\deploy.ps1 -Phase Foundation
-.\infra\deploy.ps1 -Phase Release
+.\infra\deploy.ps1 @deployment -Phase Foundation
+.\infra\deploy.ps1 @deployment -Phase Release
 ```
 
 To resume configuration after a failed release without rebuilding an already
 verified image, supply its tag with `-ImageTag <tag> -SkipBuild`.
 
-Deployment requires permission to create resources and role assignments in the
-resource group, deploy the selected models, and register an Entra application.
-The model/version parameters must match the live catalog and available quota.
-Regional model capacity and availability are checked during provisioning.
+The image/vision model names and versions are parameters on `deploy.ps1`.
+Defaults match the versions used by the maintained deployment, but availability,
+model access, quota and regional capacity vary by subscription. Override
+`-ImageModel`, `-ImageVersion`, `-VisionModel` and `-VisionVersion` with
+deployments available to your subscription when needed. A failing model
+deployment must be resolved before release.
 
 Storage public network access and anonymous blob access remain **disabled**.
 Both applications reach it through the VNet/private endpoint. Signed QR links
@@ -238,10 +259,18 @@ image generation can take one or two minutes. Only one generation runs at a time
 and per-session cooldown plus the deployed model quota limit request volume.
 The app's in-memory result disappears if the session/container restarts; download
 the PNG or use its sharing link before expiry. Generated blobs remain private in
-the existing storage account until deleted by its administrator.
+the storage account you selected until deleted by its administrator.
 
 Invitations incur job execution and email delivery charges. The Azure-managed
 email domain is intended for testing/low volume and has service sending quotas;
 use a verified custom domain and request quota increases before bulk use. The
 portal is not a mailing-list or bulk-invitation service. Never run CLI access
 changes or redeploy the generator concurrently with an access job.
+
+## Repository layout
+
+The original single-file Streamlit application remains at the repository root.
+The generation, storage, model configuration and photo-analysis modules are
+separate root-level Python files. `portal/` contains the invitation UI,
+`infra/` contains Azure provisioning and access scripts, `scripts/` contains
+operational checks, and `tests/` covers the application and deployment tooling.

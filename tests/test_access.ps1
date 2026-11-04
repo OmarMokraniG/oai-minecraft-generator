@@ -3,7 +3,17 @@ $ownerId = '11111111-1111-4111-8111-111111111111'
 $friendId = '22222222-2222-4222-8222-222222222222'
 $admin = 'admin@example.invalid'
 $friend = 'friend@example.invalid'
-$options = @{ Subscription = 'test-subscription'; DeploymentAccount = $admin }
+$options = @{
+    Subscription = 'test-subscription'
+    DeploymentAccount = $admin
+    ResourceGroup = 'test-resource-group'
+}
+$deployOptions = @{} + $options
+$deployOptions.FoundryAccount = 'test-foundry'
+$deployOptions.StorageAccount = 'teststorage'
+$deployOptions.Registry = 'testregistry'
+$deployOptions.CommunicationName = 'test-communication'
+$deployOptions.EmailName = 'test-email'
 
 function Write-TestJson {
     param([object]$Value)
@@ -163,7 +173,7 @@ if (@($login | Where-Object { $_ -like 'login_hint=*' }).Count) {
 }
 Write-Output 'PASS invitation and repeated Add update both controls without duplicate email'
 
-& "$PSScriptRoot\..\infra\deploy.ps1" -Phase Release -SkipBuild -SkipPortal -ImageTag test @options | Out-Null
+& "$PSScriptRoot\..\infra\deploy.ps1" -Phase Release -SkipBuild -SkipPortal -ImageTag test @deployOptions | Out-Null
 Assert-Membership $true
 Write-Output 'PASS redeployment preserves invited users in both controls'
 
