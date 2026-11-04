@@ -15,6 +15,13 @@ $deployOptions.Registry = 'testregistry'
 $deployOptions.CommunicationName = 'test-communication'
 $deployOptions.EmailName = 'test-email'
 
+function New-TestToken {
+    param([string]$ObjectId)
+    $claims = @{ oid = $ObjectId; tid = 'test-tenant' } | ConvertTo-Json -Compress
+    $payload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($claims))
+    "header.$($payload.TrimEnd('=').Replace('+', '-').Replace('/', '_')).signature"
+}
+
 function Write-TestJson {
     param([object]$Value)
     ConvertTo-Json -InputObject $Value -Depth 30
@@ -37,7 +44,10 @@ function Reset-TestState {
                     secrets = @(@{ name = 'entra-client-secret' })
                 }
                 template = @{ containers = @(@{
-                    env = @(@{ name = 'ALLOWED_USER_IDS'; value = $ownerId })
+                    env = @(
+                        @{ name = 'ALLOWED_USER_IDS'; value = $ownerId },
+                        @{ name = 'AZURE_STORAGE_ACCOUNT_URL'; value = 'https://teststorage.blob.core.windows.net' }
+                    )
                 }) }
             }
         }
@@ -71,6 +81,7 @@ function az {
             Write-TestJson @{ user = @{ name = $admin; type = 'user' }; tenantId = 'test-tenant' }
         }
         'account set' {}
+        'account get-access-token' { Write-TestJson @{ accessToken = New-TestToken $ownerId } }
         'ad signed-in-user' { Write-TestJson $state.Directory[$ownerId] }
         'ad user' { Write-TestJson $state.Directory[(& $valueOf '--id')] }
         'containerapp show' { Write-TestJson $state.App }
@@ -107,6 +118,7 @@ function az {
             }
         }
         'ad sp' { Write-TestJson @(@{ id = 'test-service-principal' }) }
+        'storage container-rm' { Write-TestJson @{ exists = $true } }
         'rest --method' {
             $method = & $valueOf '--method'
             $url = & $valueOf '--url'
@@ -131,6 +143,8 @@ function az {
                 }
                 $state.Invitations++
                 Write-TestJson @{ invitedUser = @{ id = $friendId } }
+            } elseif ($method -eq 'POST' -and $url -like '*/containers/access-lock/lease?api-version=*') {
+                Write-TestJson @{ leaseId = 'test-lease' }
             } elseif ($method -eq 'PUT' -and $url -like '*/authConfigs/current?api-version=*') {
                 $body = Get-Content -LiteralPath ((& $valueOf '--body').Substring(1)) -Raw |
                     ConvertFrom-Json

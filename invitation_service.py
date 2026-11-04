@@ -7,11 +7,16 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 import requests
+from azure.core.exceptions import AzureError
 from email_validator import validate_email
 
 ARM = "https://management.azure.com"
 GRAPH = "https://graph.microsoft.com/v1.0"
 API_VERSION = "2025-01-01"
+STORAGE_API_VERSION = "2023-05-01"
+LEASE_SECONDS = 60
+LEASE_RENEWAL_SECONDS = 20
+LEASE_WAIT_SECONDS = 300
 TERMINAL_STATES = {"Succeeded", "Failed", "Stopped"}
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,49 @@ class AzureApi:
 
     def arm(self, method, resource, **kwargs):
         return self.request(method, f"{ARM}{resource}?api-version={API_VERSION}", **kwargs)
+
+
+class AccessLock:
+    def __init__(self, api, lock_id):
+        self.api = api
+        self.url = f"{ARM}{lock_id}/lease?api-version={STORAGE_API_VERSION}"
+        self.stopped = threading.Event()
+        self.lease_id = None
+        self.renewal = None
+
+    def lease(self, **body):
+        return self.api.request("POST", self.url, json=body)
+
+    def __enter__(self):
+        deadline = time.monotonic() + LEASE_WAIT_SECONDS
+        while True:
+            try:
+                self.lease_id = self.lease(action="Acquire", leaseDuration=LEASE_SECONDS)["leaseId"]
+                break
+            except requests.HTTPError as error:
+                if error.response is None or error.response.status_code != 409:
+                    raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Another access update is still running")
+            time.sleep(5)
+        self.renewal = threading.Thread(target=self.renew, daemon=True)
+        self.renewal.start()
+        return self
+
+    def renew(self):
+        while not self.stopped.wait(LEASE_RENEWAL_SECONDS):
+            try:
+                self.lease(action="Renew", leaseId=self.lease_id)
+            except (AzureError, requests.RequestException) as exc:
+                logger.warning("Could not renew the access lock: %s", type(exc).__name__)
+
+    def __exit__(self, *details):
+        self.stopped.set()
+        self.renewal.join()
+        try:
+            self.lease(action="Release", leaseId=self.lease_id)
+        except (AzureError, requests.RequestException) as exc:
+            logger.warning("Could not release the access lock: %s", type(exc).__name__)
 
 
 class AccessManager:

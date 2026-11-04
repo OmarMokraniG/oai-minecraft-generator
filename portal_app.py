@@ -33,7 +33,9 @@ def create_app(administrator, base_url, generator_url, jobs, access):
         return FileResponse(STATIC / "index.html")
 
     async def session(request):
-        token = secrets.token_urlsafe(32)
+        token = request.cookies.get("portal-csrf", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+            token = secrets.token_urlsafe(32)
         response = JSONResponse({"csrf": token, "generatorUrl": generator_url})
         response.set_cookie(
             "portal-csrf", token, httponly=True, secure=True, samesite="strict", max_age=3600

@@ -10,6 +10,7 @@ from azure.core.exceptions import AzureError
 from azure.identity import DefaultAzureCredential
 
 from invitation_service import (
+    AccessLock,
     AccessManager,
     AzureApi,
     https_url,
@@ -40,11 +41,14 @@ def run():
             os.environ["ADMIN_USER_ID"],
             app_url,
         )
+        lock = AccessLock(AzureApi(credential), os.environ["ACCESS_LOCK_ID"])
         if action == "revoke":
-            manager.revoke(target)
+            with lock:
+                manager.revoke(target)
             print(json.dumps({"status": "access_revoked", "operationId": operation}), flush=True)
             return 0
-        redeem_url = manager.grant(target)
+        with lock:
+            redeem_url = manager.grant(target)
         stage = "email"
         with EmailClient(https_url(os.environ["EMAIL_ENDPOINT"]), credential) as client:
             result = client.begin_send(

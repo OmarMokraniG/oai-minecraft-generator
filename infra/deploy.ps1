@@ -78,13 +78,15 @@ if ($Phase -in @('Foundation', 'All')) {
     )) {
         $deployments = @(Invoke-Azure (@('cognitiveservices', 'account', 'deployment', 'list',
             '--name', $FoundryAccount) + $groupArgs))
-        if ($model.Name -notin $deployments.name) {
-            Write-Host "Deploying model $($model.Name)"
+        $existing = @($deployments | Where-Object { $_.name -eq $model.Name })
+        if ($existing.Count -eq 0 -or $existing[0].properties.model.version -ne $model.Version) {
+            $capacity = if ($existing.Count) { [string]$existing[0].sku.capacity } else { $model.Capacity }
+            Write-Host "Deploying model $($model.Name) version $($model.Version)"
             Invoke-Azure (@('cognitiveservices', 'account', 'deployment', 'create',
                 '--name', $FoundryAccount, '--deployment-name', $model.Name,
                 '--model-name', $model.Name, '--model-version', $model.Version,
                 '--model-format', 'OpenAI', '--sku-name', 'GlobalStandard',
-                '--sku-capacity', $model.Capacity) + $groupArgs) | Out-Null
+                '--sku-capacity', $capacity) + $groupArgs) | Out-Null
         }
     }
     $identities = @(Invoke-Azure (@('identity', 'list') + $groupArgs))
@@ -174,7 +176,7 @@ if ($Phase -in @('Foundation', 'All')) {
         & "$PSScriptRoot\portal.ps1" -Phase Foundation -Subscription $Subscription `
             -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
             -Location $Location -Registry $Registry -Environment $Environment -AppName $AppName `
-            -CommunicationName $CommunicationName -EmailName $EmailName
+            -StorageAccount $StorageAccount -CommunicationName $CommunicationName -EmailName $EmailName
     }
 }
 
@@ -225,7 +227,6 @@ if ($existingWeb.Count -eq 1) {
         $allowedUserIds = @(Get-AccessUserIds -Auth $existingAuth -OwnerId $ownerId)
     }
 }
-$appVariables += "ALLOWED_USER_IDS=$($allowedUserIds -join ',')"
 if ($DownloadAppName -notin $apps.name) {
     Invoke-Azure (@('containerapp', 'create', '--name', $DownloadAppName,
         '--environment', $environmentResource.id, '--image', $image,
@@ -250,14 +251,10 @@ if ($AppName -notin $apps.name) {
         '--ingress', 'internal', '--target-port', '8501',
         '--transport', 'http', '--cpu', '1.0', '--memory', '2Gi',
         '--min-replicas', '0', '--max-replicas', '1',
-        '--env-vars') + $appVariables + $groupArgs) | Out-Null
-} else {
-    Invoke-Azure (@('containerapp', 'update', '--name', $AppName, '--image', $image,
-        '--min-replicas', '0', '--max-replicas', '1',
-        '--set-env-vars') + $appVariables + $groupArgs) | Out-Null
+        '--env-vars') + $appVariables + "ALLOWED_USER_IDS=$ownerId" + $groupArgs) | Out-Null
 }
 
-$registrations = @(Invoke-Azure @('ad', 'app', 'list', '--display-name', 'minecraft-generator-web'))
+$registrations =@(Invoke-Azure @('ad', 'app', 'list', '--display-name', 'minecraft-generator-web'))
 if ($registrations.Count -gt 1) {
     throw 'Multiple matching Entra app registrations; resolve before deploying.'
 }
@@ -369,9 +366,32 @@ $auth = @{
         httpSettings = @{ requireHttps = $true }
     }
 }
-Invoke-AzureJson -Method PUT -Body $auth -Url (
-    "https://management.azure.com$resourcePrefix/Microsoft.App/containerApps/$AppName/authConfigs/current?api-version=2025-01-01"
-) | Out-Null
+$webId = "$resourcePrefix/Microsoft.App/containerApps/$AppName"
+$lockArgs = @('--storage-account', $StorageAccount, '--name', $accessLockContainer) + $groupArgs
+if (-not (Invoke-Azure (@('storage', 'container-rm', 'exists') + $lockArgs)).exists) {
+    Invoke-Azure (@('storage', 'container-rm', 'create') + $lockArgs) | Out-Null
+}
+$lock = Enter-AccessLock -LockId (Get-AccessLockId -StorageId (
+    "$resourcePrefix/Microsoft.Storage/storageAccounts/$StorageAccount"
+))
+try {
+    $currentAuth = Get-ContainerAppAuth -ResourceId $webId
+    if ($null -ne $currentAuth) {
+        $allowedUserIds = @(Get-AccessUserIds -Auth $currentAuth -OwnerId $ownerId)
+    }
+    $aad = $auth.properties.identityProviders.azureActiveDirectory
+    $aad.login.loginParameters = @(Get-AccountSelectionParameters `
+        -UserIds $allowedUserIds -DeploymentAccount $DeploymentAccount)
+    $aad.validation.defaultAuthorizationPolicy.allowedPrincipals.identities = $allowedUserIds
+    Invoke-AzureJson -Method PUT -Body $auth -Url (
+        "https://management.azure.com$webId/authConfigs/current?api-version=2025-01-01"
+    ) | Out-Null
+    Invoke-Azure (@('containerapp', 'update', '--name', $AppName, '--image', $image,
+        '--min-replicas', '0', '--max-replicas', '1', '--set-env-vars') + $appVariables +
+        "ALLOWED_USER_IDS=$($allowedUserIds -join ',')" + $groupArgs) | Out-Null
+} finally {
+    Exit-AccessLock -Lock $lock
+}
 Invoke-Azure (@('containerapp', 'ingress', 'enable', '--name', $AppName,
     '--type', 'external', '--target-port', '8501', '--transport', 'http') + $groupArgs) |
     Out-Null
@@ -379,7 +399,7 @@ if (-not $SkipPortal) {
     & "$PSScriptRoot\portal.ps1" -Phase Release -Subscription $Subscription `
         -DeploymentAccount $DeploymentAccount -ResourceGroup $ResourceGroup `
         -Location $Location -Registry $Registry -Environment $Environment `
-        -AppName $AppName -ImageTag $ImageTag `
+        -AppName $AppName -ImageTag $ImageTag -StorageAccount $StorageAccount `
         -CommunicationName $CommunicationName -EmailName $EmailName
 }
 

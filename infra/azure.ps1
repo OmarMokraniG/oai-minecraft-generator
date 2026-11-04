@@ -1,3 +1,5 @@
+$accessLockContainer = 'access-lock'
+
 function Invoke-Azure {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
     $result = & az @Arguments --only-show-errors --output json
@@ -22,6 +24,14 @@ function Invoke-AzureJson {
     }
 }
 
+function Get-AzureTokenClaims {
+    param([string]$Subscription)
+    $token = (Invoke-Azure @('account', 'get-access-token', '--subscription', $Subscription)).accessToken
+    $payload = $token.Split('.')[1].Replace('-', '+').Replace('_', '/')
+    $payload = $payload.PadRight([math]::Ceiling($payload.Length / 4) * 4, '=')
+    [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+}
+
 function Assert-DeploymentAccount {
     param([string]$Subscription, [string]$DeploymentAccount)
     $account = Invoke-Azure @('account', 'show', '--subscription', $Subscription)
@@ -33,13 +43,70 @@ function Assert-DeploymentAccount {
     }
     Invoke-Azure @('account', 'set', '--subscription', $Subscription) | Out-Null
     $user = Invoke-Azure @('ad', 'signed-in-user', 'show')
-    if ($user.userPrincipalName -ine $account.user.name) {
+    $claims = Get-AzureTokenClaims -Subscription $Subscription
+    if ($claims.tid -ine $account.tenantId -or $claims.oid -ine $user.id) {
         throw 'The Microsoft Graph session does not match the signed-in Azure CLI user.'
     }
     [pscustomobject]@{
         Account = $account
         User = $user
-        DeploymentAccount = $user.userPrincipalName
+        DeploymentAccount = $account.user.name
+    }
+}
+
+function Get-AccessLockId {
+    param([string]$StorageId)
+    "$StorageId/blobServices/default/containers/$accessLockContainer"
+}
+
+function Enter-AccessLock {
+    param([string]$LockId)
+    $url = "https://management.azure.com$LockId/lease?api-version=2023-05-01"
+    $file = Join-Path ([System.IO.Path]::GetTempPath()) "minecraft-$([guid]::NewGuid()).json"
+    try {
+        @{ action = 'Acquire'; leaseDuration = 60 } | ConvertTo-Json |
+            Set-Content -LiteralPath $file -Encoding utf8
+        $deadline = (Get-Date).AddMinutes(5)
+        while ($true) {
+            $result = & az rest --method POST --url $url --body "@$file" --only-show-errors --output json 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                break
+            }
+            if ("$result" -notlike '*Conflict(*') {
+                throw "Could not lock access updates. Run deploy.ps1 if this deployment predates the lock. $result"
+            }
+            if ((Get-Date) -ge $deadline) {
+                throw 'Timed out waiting for another access update to finish.'
+            }
+            Start-Sleep -Seconds 5
+        }
+        $leaseId = (($result -join "`n") | ConvertFrom-Json).leaseId
+        @{ action = 'Renew'; leaseId = $leaseId } | ConvertTo-Json |
+            Set-Content -LiteralPath $file -Encoding utf8
+    } catch {
+        Remove-Item -LiteralPath $file -ErrorAction SilentlyContinue
+        throw
+    }
+    $renewal = Start-ThreadJob -ArgumentList $url, $file -ScriptBlock {
+        param($Url, $File)
+        while ($true) {
+            Start-Sleep -Seconds 20
+            & az rest --method POST --url $Url --body "@$File" --only-show-errors --output none
+        }
+    }
+    [pscustomobject]@{ Url = $url; LeaseId = $leaseId; File = $file; Renewal = $renewal }
+}
+
+function Exit-AccessLock {
+    param([object]$Lock)
+    Remove-Job -Job $Lock.Renewal -Force
+    Remove-Item -LiteralPath $Lock.File -ErrorAction SilentlyContinue
+    try {
+        Invoke-AzureJson -Method POST -Url $Lock.Url -Body @{
+            action = 'Release'; leaseId = $Lock.LeaseId
+        } | Out-Null
+    } catch {
+        Write-Warning 'The access lock expired before it was released. Confirm the result with List.'
     }
 }
 

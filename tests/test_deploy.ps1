@@ -11,6 +11,13 @@ $deployment = @{
 }
 $state = @{ Calls = [System.Collections.Generic.List[string]]::new() }
 
+function New-TestToken {
+    param([string]$ObjectId)
+    $claims = @{ oid = $ObjectId; tid = 'test-tenant' } | ConvertTo-Json -Compress
+    $payload = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($claims))
+    "header.$($payload.TrimEnd('=').Replace('+', '-').Replace('/', '_')).signature"
+}
+
 function az {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
     $global:LASTEXITCODE = 0
@@ -24,9 +31,12 @@ function az {
             } | ConvertTo-Json
         }
         'account set' { return }
+        'account get-access-token' {
+            return @{ accessToken = New-TestToken 'test-user-id' } | ConvertTo-Json
+        }
         'ad signed-in-user' {
             return @{
-                id = 'test-user-id'
+                id = $state.GraphId
                 userPrincipalName = $state.GraphUser
             } | ConvertTo-Json
         }
@@ -51,21 +61,21 @@ $cases = @(
     @{
         Name = 'Rejects a mismatched Microsoft Graph session'
         CliUser = $deploymentAccount; CliType = 'user'
-        GraphUser = 'other@example.invalid'
-        Expected = 'The Microsoft Graph session does not match'; Calls = 3
+        GraphUser = $deploymentAccount; GraphId = 'other-user-id'
+        Expected = 'The Microsoft Graph session does not match'; Calls = 4
     },
     @{
         Name = 'Accepts the signed-in user without a hard-coded account'
         CliUser = 'current@example.invalid'; CliType = 'user'
         GraphUser = 'current@example.invalid'
-        Expected = 'Identity validation passed; stop before provisioning.'; Calls = 4
+        Expected = 'Identity validation passed; stop before provisioning.'; Calls = 5
         UseAccountOverride = $false
     },
     @{
         Name = 'Accepts the configured user case-insensitively'
         CliUser = $deploymentAccount.ToUpperInvariant(); CliType = 'user'
         GraphUser = $deploymentAccount.ToUpperInvariant()
-        Expected = 'Identity validation passed; stop before provisioning.'; Calls = 4
+        Expected = 'Identity validation passed; stop before provisioning.'; Calls = 5
     }
 )
 
@@ -74,6 +84,7 @@ foreach ($case in $cases) {
     $state.CliUser = $case.CliUser
     $state.CliType = $case.CliType
     $state.GraphUser = $case.GraphUser
+    $state.GraphId = if ($case.GraphId) { $case.GraphId } else { 'test-user-id' }
     $parameters = @{} + $deployment
     $parameters.Phase = 'Release'
     $parameters.SkipBuild = $true

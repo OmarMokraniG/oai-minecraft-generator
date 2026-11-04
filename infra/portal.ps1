@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory)][string]$Registry,
     [Parameter(Mandatory)][string]$Environment,
     [string]$AppName = 'ca-minecraftgen-web',
+    [Parameter(Mandatory)][string]$StorageAccount,
     [Parameter(Mandatory)][string]$CommunicationName,
     [Parameter(Mandatory)][string]$EmailName,
     [string]$ImageTag
@@ -30,15 +31,17 @@ $emailId = "$prefix/Microsoft.Communication/emailServices/$emailName"
 $domainId = "$emailId/domains/AzureManagedDomain"
 $jobId = "$prefix/Microsoft.App/jobs/$jobName"
 $webId = "$prefix/Microsoft.App/containerApps/$AppName"
+$storageId = "$prefix/Microsoft.Storage/storageAccounts/$StorageAccount"
+$lockId = Get-AccessLockId -StorageId $storageId
+$roleSuffix = "$Subscription $ResourceGroup".ToLowerInvariant()
 
 function Ensure-CustomRole {
     param([string]$Name, [string[]]$Actions)
-    $existing = @(Invoke-Azure @('role', 'definition', 'list', '--name', $Name,
+    $existing = @(Invoke-Azure @('role', 'definition', 'list', '--name', $Name, '--scope', $groupId,
         '--subscription', $Subscription))
     if ($existing.Count -gt 1) { throw "Multiple definitions for role $Name" }
-    $id = if ($existing.Count) { $existing[0].id } else {
-        "/subscriptions/$Subscription/providers/Microsoft.Authorization/roleDefinitions/$([guid]::NewGuid())"
-    }
+    $roleId = if ($existing.Count) { $existing[0].name } else { [guid]::NewGuid() }
+    $id = "/subscriptions/$Subscription/providers/Microsoft.Authorization/roleDefinitions/$roleId"
     Invoke-AzureJson -Method PUT -Url "https://management.azure.com${id}?api-version=2022-04-01" -Body @{
         properties = @{
             roleName = $Name; type = 'CustomRole'
@@ -106,23 +109,26 @@ if ($Phase -eq 'Foundation') {
         $identity = Invoke-Azure (@('identity', 'show', '--name', $name) + $groupArgs)
         Grant-Role "$prefix/Microsoft.ContainerRegistry/registries/$Registry" $identity.principalId 'AcrPull'
     }
-    Ensure-CustomRole 'Minecraft Invitation Access Writer' @(
+    Ensure-CustomRole "Minecraft Invitation Access Writer $roleSuffix" @(
         'Microsoft.App/containerApps/read', 'Microsoft.App/containerApps/write',
         'Microsoft.App/containerApps/authConfigs/read', 'Microsoft.App/containerApps/authConfigs/write'
     )
-    Ensure-CustomRole 'Minecraft Access Reader' @(
+    Ensure-CustomRole "Minecraft Access Reader $roleSuffix" @(
         'Microsoft.App/containerApps/read', 'Microsoft.App/containerApps/authConfigs/read'
     )
-    Ensure-CustomRole 'Minecraft Invitation Job Starter' @(
+    Ensure-CustomRole "Minecraft Invitation Job Starter $roleSuffix" @(
         'Microsoft.App/jobs/read', 'Microsoft.App/jobs/start/action', 'Microsoft.App/jobs/executions/read'
     )
-    Ensure-CustomRole 'Minecraft Invitation Email Sender' @(
+    Ensure-CustomRole "Minecraft Access Lock User $roleSuffix" @(
+        'Microsoft.Storage/storageAccounts/blobServices/containers/lease/action'
+    )
+    Ensure-CustomRole "Minecraft Invitation Email Sender $roleSuffix" @(
         'Microsoft.Communication/communicationServices/read',
         'Microsoft.Communication/communicationServices/write',
         'Microsoft.Communication/emailServices/write'
     )
     $worker = Invoke-Azure (@('identity', 'show', '--name', 'id-minecraftgen-invite') + $groupArgs)
-    Grant-Role $communicationId $worker.principalId 'Minecraft Invitation Email Sender'
+    Grant-Role $communicationId $worker.principalId "Minecraft Invitation Email Sender $roleSuffix"
     $graph = Invoke-Azure @('ad', 'sp', 'show', '--id', '00000003-0000-0000-c000-000000000000')
     $reader = Invoke-Azure (@('identity', 'show', '--name', 'id-minecraftgen-admin') + $groupArgs)
     foreach ($target in @(
@@ -162,8 +168,9 @@ $endpoint = "https://$($communication.properties.hostName)"
 $generatorUrl = "https://$AppName.$($environmentResource.properties.defaultDomain)"
 $portalUrl = "https://$portalName.$($environmentResource.properties.defaultDomain)"
 $image = "$Registry.azurecr.io/minecraft-generator:$ImageTag"
-Grant-Role $webId $worker.principalId 'Minecraft Invitation Access Writer'
-Grant-Role $webId $portalIdentity.principalId 'Minecraft Access Reader'
+Grant-Role $webId $worker.principalId "Minecraft Invitation Access Writer $roleSuffix"
+Grant-Role $webId $portalIdentity.principalId "Minecraft Access Reader $roleSuffix"
+Grant-Role $lockId $worker.principalId "Minecraft Access Lock User $roleSuffix"
 Invoke-AzureJson -Method PUT -Url "https://management.azure.com${jobId}?api-version=2025-01-01" -Body @{
     location = $Location
     identity = @{ type = 'UserAssigned'; userAssignedIdentities = @{ $worker.id = @{} } }
@@ -181,6 +188,7 @@ Invoke-AzureJson -Method PUT -Url "https://management.azure.com${jobId}?api-vers
                 @{ name = 'AZURE_CLIENT_ID'; value = $worker.clientId },
                 @{ name = 'ADMIN_USER_ID'; value = $ownerId },
                 @{ name = 'GENERATOR_RESOURCE_ID'; value = $webId },
+                @{ name = 'ACCESS_LOCK_ID'; value = $lockId },
                 @{ name = 'GENERATOR_URL'; value = $generatorUrl },
                 @{ name = 'EMAIL_ENDPOINT'; value = $endpoint },
                 @{ name = 'EMAIL_SENDER'; value = $sender }
@@ -188,7 +196,7 @@ Invoke-AzureJson -Method PUT -Url "https://management.azure.com${jobId}?api-vers
         }) }
     }
 } | Out-Null
-Grant-Role $jobId $portalIdentity.principalId 'Minecraft Invitation Job Starter'
+Grant-Role $jobId $portalIdentity.principalId "Minecraft Invitation Job Starter $roleSuffix"
 $variables = @(
     "AZURE_CLIENT_ID=$($portalIdentity.clientId)", "ADMIN_USER_ID=$ownerId",
     "PORTAL_BASE_URL=$portalUrl", "GENERATOR_URL=$generatorUrl",

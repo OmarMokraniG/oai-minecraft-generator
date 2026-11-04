@@ -16,6 +16,7 @@ RESOURCE = "/subscriptions/test/resourceGroups/test/providers/Microsoft.App/cont
 APP_URL = "https://generator.example.com"
 PORTAL_URL = "https://portal.example.com"
 REDEEM_URL = "https://invitations.microsoft.com/redeem/?tenant=test&user=test"
+LOCK = "/subscriptions/test/resourceGroups/test/providers/Microsoft.Storage/storageAccounts/test"
 
 
 def auth(ids=None):
@@ -260,6 +261,7 @@ def test_worker_only_reports_success_after_access_verified_and_email_confirmed(
         "GENERATOR_URL": APP_URL,
         "GENERATOR_RESOURCE_ID": RESOURCE,
         "ADMIN_USER_ID": ADMIN,
+        "ACCESS_LOCK_ID": LOCK,
         "EMAIL_ENDPOINT": "https://email.communication.azure.com",
         "EMAIL_SENDER": "sender@example.com",
     }.items():
@@ -269,6 +271,7 @@ def test_worker_only_reports_success_after_access_verified_and_email_confirmed(
     if failure == "authorization":
         manager.grant.side_effect = requests.HTTPError("No authorization")
     monkeypatch.setattr(invitation_worker, "AccessManager", lambda *args: manager)
+    monkeypatch.setattr(invitation_worker, "AccessLock", MagicMock())
     monkeypatch.setattr(invitation_worker, "DefaultAzureCredential", MagicMock())
     email = MagicMock()
     email.begin_send.return_value.result.return_value = {
@@ -425,12 +428,14 @@ def test_revoke_worker_never_invites_or_sends_mail(monkeypatch, capsys, failure)
         "GENERATOR_URL": APP_URL,
         "GENERATOR_RESOURCE_ID": RESOURCE,
         "ADMIN_USER_ID": ADMIN,
+        "ACCESS_LOCK_ID": LOCK,
     }.items():
         monkeypatch.setenv(key, value)
     manager = MagicMock()
     if failure:
         manager.revoke.side_effect = requests.HTTPError("Permission update failed")
     monkeypatch.setattr(invitation_worker, "AccessManager", lambda *args: manager)
+    monkeypatch.setattr(invitation_worker, "AccessLock", MagicMock())
     monkeypatch.setattr(invitation_worker, "DefaultAzureCredential", MagicMock())
     email = MagicMock()
     monkeypatch.setattr(invitation_worker, "EmailClient", email)

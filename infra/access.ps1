@@ -47,14 +47,19 @@ if (($runtimeIds -join ',') -ne ($allowed -join ',')) {
 }
 
 if ($Action -eq 'List') {
+    $directory = Invoke-AzureJson -Method POST `
+        -Url 'https://graph.microsoft.com/v1.0/directoryObjects/getByIds' -Body @{
+            ids = $allowed; types = @('user')
+        }
     foreach ($id in $allowed) {
-        $user = Invoke-Azure @('ad', 'user', 'show', '--id', $id)
+        $user = $directory.value | Where-Object { $_.id -eq $id } | Select-Object -First 1
         [pscustomobject]@{
             UserId = $id
-            Name = $user.displayName
+            Name = $(if ($user) { $user.displayName } else { 'Deleted directory account' })
             Email = $(if ($user.mail) { $user.mail } else { $user.userPrincipalName })
             Administrator = ($id -eq $ownerId)
             RuntimeAllowed = ($id -in $runtimeIds)
+            DirectoryMissing = ($null -eq $user)
         }
     }
     return
@@ -86,55 +91,70 @@ if (-not $PSCmdlet.ShouldProcess(
     return
 }
 
-if ($Action -eq 'Add') {
-    if ($null -eq $user) {
-        $invitation = Invoke-AzureJson -Method POST `
-            -Url 'https://graph.microsoft.com/v1.0/invitations' -Body @{
-                invitedUserEmailAddress = $Email
-                inviteRedirectUrl = "$url/.auth/login/aad?post_login_redirect_uri=%2F"
-                sendInvitationMessage = $true
-            }
-        $UserId = $invitation.invitedUser.id
-        if (-not $UserId) {
-            throw 'The invitation returned no user ID; no application access was changed.'
-        }
-    }
-    $parsedId = [guid]::Empty
-    if (-not [guid]::TryParse($UserId, [ref]$parsedId) -or $parsedId -eq [guid]::Empty) {
-        throw 'The directory returned an invalid user ID; no application access was changed.'
-    }
-    $UserId = $parsedId.ToString()
-    $allowed = @($allowed + $UserId | Sort-Object -Unique)
-} else {
-    $allowed = @($allowed | Where-Object { $_ -ne $UserId })
+$storageUrl = ($app.properties.template.containers[0].env |
+    Where-Object { $_.name -eq 'AZURE_STORAGE_ACCOUNT_URL' }).value
+if (-not $storageUrl) {
+    throw 'The application has no storage account configured. Run deploy.ps1 before managing access.'
 }
-
-$aad = $auth.properties.identityProviders.azureActiveDirectory
-$aad.validation.defaultAuthorizationPolicy.allowedPrincipals.identities = $allowed
-if ($null -eq $aad.login) {
-    $aad | Add-Member -NotePropertyName login -NotePropertyValue ([pscustomobject]@{})
-}
-$aad.login | Add-Member -NotePropertyName loginParameters -Force -NotePropertyValue (
-    @(Get-AccountSelectionParameters -UserIds $allowed -DeploymentAccount $DeploymentAccount)
-)
-Invoke-AzureJson -Method PUT -Body @{ properties = $auth.properties } -Url (
-    "https://management.azure.com$($app.id)/authConfigs/current?api-version=2025-01-01"
-) | Out-Null
+$storageAccount = ([uri]$storageUrl).Host.Split('.')[0]
+$lock = Enter-AccessLock -LockId (Get-AccessLockId -StorageId (
+    "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.Storage/storageAccounts/$storageAccount"
+))
 try {
-    Invoke-Azure (@('containerapp', 'update', '--name', $AppName,
-        '--set-env-vars', "ALLOWED_USER_IDS=$($allowed -join ',')") + $groupArgs) | Out-Null
-} catch {
-    throw "Entra authorization was updated but runtime synchronization failed. Re-run the same command to repair it. $($_.Exception.Message)"
-}
+    $auth = Get-ContainerAppAuth -ResourceId $app.id
+    $allowed = @(Get-AccessUserIds -Auth $auth -OwnerId $ownerId)
+    if ($Action -eq 'Add') {
+        if ($null -eq $user) {
+            $invitation = Invoke-AzureJson -Method POST `
+                -Url 'https://graph.microsoft.com/v1.0/invitations' -Body @{
+                    invitedUserEmailAddress = $Email
+                    inviteRedirectUrl = "$url/.auth/login/aad?post_login_redirect_uri=%2F"
+                    sendInvitationMessage = $true
+                }
+            $UserId = $invitation.invitedUser.id
+            if (-not $UserId) {
+                throw 'The invitation returned no user ID; no application access was changed.'
+            }
+        }
+        $parsedId = [guid]::Empty
+        if (-not [guid]::TryParse($UserId, [ref]$parsedId) -or $parsedId -eq [guid]::Empty) {
+            throw 'The directory returned an invalid user ID; no application access was changed.'
+        }
+        $UserId = $parsedId.ToString()
+        $allowed = @($allowed + $UserId | Sort-Object -Unique)
+    } else {
+        $allowed = @($allowed | Where-Object { $_ -ne $UserId })
+    }
 
-$updatedAuth = Get-ContainerAppAuth -ResourceId $app.id
-$updatedIds = @(Get-AccessUserIds -Auth $updatedAuth -OwnerId $ownerId)
-$updatedApp = Invoke-Azure (@('containerapp', 'show', '--name', $AppName) + $groupArgs)
-$updatedRuntime = @((($updatedApp.properties.template.containers[0].env |
-    Where-Object { $_.name -eq 'ALLOWED_USER_IDS' }).value -split ',') | Sort-Object -Unique)
-if (($updatedIds -join ',') -ne ($allowed -join ',') -or
-    ($updatedRuntime -join ',') -ne ($allowed -join ',')) {
-    throw 'Access verification failed. Another administrator may have changed access; inspect List.'
+    $aad = $auth.properties.identityProviders.azureActiveDirectory
+    $aad.validation.defaultAuthorizationPolicy.allowedPrincipals.identities = $allowed
+    if ($null -eq $aad.login) {
+        $aad | Add-Member -NotePropertyName login -NotePropertyValue ([pscustomobject]@{})
+    }
+    $aad.login | Add-Member -NotePropertyName loginParameters -Force -NotePropertyValue (
+        @(Get-AccountSelectionParameters -UserIds $allowed -DeploymentAccount $DeploymentAccount)
+    )
+    Invoke-AzureJson -Method PUT -Body @{ properties = $auth.properties } -Url (
+        "https://management.azure.com$($app.id)/authConfigs/current?api-version=2025-01-01"
+    ) | Out-Null
+    try {
+        Invoke-Azure (@('containerapp', 'update', '--name', $AppName,
+            '--set-env-vars', "ALLOWED_USER_IDS=$($allowed -join ',')") + $groupArgs) | Out-Null
+    } catch {
+        throw "Entra authorization was updated but runtime synchronization failed. Re-run the same command to repair it. $($_.Exception.Message)"
+    }
+
+    $updatedAuth = Get-ContainerAppAuth -ResourceId $app.id
+    $updatedIds = @(Get-AccessUserIds -Auth $updatedAuth -OwnerId $ownerId)
+    $updatedApp = Invoke-Azure (@('containerapp', 'show', '--name', $AppName) + $groupArgs)
+    $updatedRuntime = @((($updatedApp.properties.template.containers[0].env |
+        Where-Object { $_.name -eq 'ALLOWED_USER_IDS' }).value -split ',') | Sort-Object -Unique)
+    if (($updatedIds -join ',') -ne ($allowed -join ',') -or
+        ($updatedRuntime -join ',') -ne ($allowed -join ',')) {
+        throw 'Access verification failed. Another administrator may have changed access; inspect List.'
+    }
+} finally {
+    Exit-AccessLock -Lock $lock
 }
 [pscustomobject]@{
     Action = $Action
